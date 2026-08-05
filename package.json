@@ -1,0 +1,37 @@
+{
+  "name": "background-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Background Studio host: one tray to manage Codex and Notion background plugins.",
+  "author": "Background Studio contributors",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "npm run dev:tauri",
+    "dev:tauri": "tauri dev",
+    "dev:web": "vite --host 127.0.0.1",
+    "build:web": "vite build",
+    "build": "npm run package:tauri",
+    "tauri": "tauri",
+    "test": "npm run check:tauri",
+    "check": "tsc --noEmit && npm run test",
+    "check:tauri": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "package:win": "npm run package:tauri",
+    "package:tauri": "tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "lucide-react": "1.24.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/node": "24.10.13",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.3",
+    "typescript": "7.0.2",
+    "vite": "8.1.5"
+  }
+}

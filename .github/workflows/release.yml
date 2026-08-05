@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Build and publish Windows release
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Verify tag and application versions
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $npmVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargo = cargo metadata --manifest-path src-tauri/Cargo.toml --no-deps --format-version 1 | ConvertFrom-Json
+          $cargoVersion = ($cargo.packages | Where-Object name -eq "background-studio").version
+          if ($tag -ne "v$npmVersion") {
+            throw "标签 $tag 与 package.json 版本 v$npmVersion 不一致。"
+          }
+          if ($tauriVersion -ne $npmVersion -or $cargoVersion -ne $npmVersion) {
+            throw "package.json、tauri.conf.json 与 Cargo.toml 的版本号不一致。"
+          }
+
+      - name: Run checks
+        run: npm run check
+
+      - name: Build and publish GitHub Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Background Studio ${{ github.ref_name }}"
+          releaseBody: |
+            Background Studio 壳（pluginProtocol: 1）。
+
+            安装后请在界面中从各自 Release 安装 Codex / Notion 插件（`*-plugin.zip`）。
+            迁移说明见仓库 `docs/migration.md`。
+          releaseDraft: false
+          prerelease: false

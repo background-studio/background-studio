@@ -1,0 +1,179 @@
+:root {
+  color-scheme: light dark;
+  --bg: #0f1419;
+  --panel: #1a222c;
+  --line: #2c3846;
+  --text: #e8eef5;
+  --muted: #93a4b5;
+  --accent: #3ec7ff;
+  --accent-dim: rgba(62, 199, 255, 0.14);
+  --danger: #ff6b7a;
+  --ok: #4ade80;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(1200px 500px at 10% -10%, rgba(62, 199, 255, 0.16), transparent 55%),
+    radial-gradient(900px 400px at 90% 0%, rgba(120, 90, 255, 0.1), transparent 50%),
+    var(--bg);
+  color: var(--text);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 28px 24px 40px;
+}
+
+.hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 22px;
+}
+
+.hero h1 {
+  margin: 0 0 8px;
+  font-size: 1.7rem;
+  letter-spacing: 0.02em;
+}
+
+.hero p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.warning {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 180, 80, 0.35);
+  background: rgba(255, 180, 80, 0.1);
+  border-radius: 12px;
+  color: #ffd9a8;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 14px;
+}
+
+.card {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent), var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.card h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.meta {
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 0.78rem;
+}
+
+.badge.warn {
+  background: rgba(255, 180, 80, 0.14);
+  color: #ffd9a8;
+}
+
+.badge.ok {
+  background: rgba(74, 222, 128, 0.14);
+  color: var(--ok);
+}
+
+button,
+label.toggle {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: #243040;
+  color: var(--text);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+
+button.primary {
+  background: linear-gradient(180deg, #49d0ff, #1ea8d8);
+  border-color: transparent;
+  color: #041018;
+  font-weight: 600;
+}
+
+button.danger {
+  border-color: rgba(255, 107, 122, 0.45);
+  color: var(--danger);
+  background: rgba(255, 107, 122, 0.08);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.settings {
+  margin-top: 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+}
+
+.settings label {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+}
+
+.error {
+  margin-top: 12px;
+  color: var(--danger);
+}

@@ -1,0 +1,35 @@
+[package]
+name = "background-studio"
+version = "0.1.0"
+description = "Background Studio host for Codex and Notion background plugins."
+authors = ["Background Studio contributors"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "background_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tauri = { version = "2.11.3", features = ["tray-icon"] }
+tauri-plugin-dialog = "2.7.2"
+tauri-plugin-opener = "2.5.4"
+tauri-plugin-single-instance = "2.4.3"
+tokio = { version = "1.53.1", features = ["fs", "io-util", "net", "time", "sync"] }
+reqwest = { version = "0.13.3", default-features = false, features = ["blocking", "json", "native-tls-no-alpn"] }
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
+winreg = "0.56.0"
+uuid = { version = "1.20.0", features = ["v4"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

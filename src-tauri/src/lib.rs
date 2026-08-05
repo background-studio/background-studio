@@ -1,0 +1,219 @@
+mod catalog;
+mod host;
+mod ipc;
+mod plugins;
+
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, MutexGuard,
+    },
+};
+
+use plugins::{HostSnapshot, PluginManager};
+use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::sync::Mutex as AsyncMutex;
+
+const SNAPSHOT_EVENT: &str = "host:snapshot-changed";
+
+pub struct HostState {
+    plugins: AsyncMutex<PluginManager>,
+    tray: Mutex<Option<host::TrayUi>>,
+    quitting: AtomicBool,
+}
+
+fn lock_tray(
+    value: &Mutex<Option<host::TrayUi>>,
+) -> Result<MutexGuard<'_, Option<host::TrayUi>>, String> {
+    value.lock().map_err(|_| "托盘状态锁已损坏。".to_string())
+}
+
+fn data_directory() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("BackgroundStudio")
+}
+
+async fn build_snapshot(state: &HostState) -> HostSnapshot {
+    let mut plugins = state.plugins.lock().await;
+    plugins.snapshot().await
+}
+
+pub async fn emit_snapshot(app: &AppHandle) -> Result<HostSnapshot, String> {
+    let state = app.state::<HostState>();
+    let snapshot = build_snapshot(&state).await;
+    let running = snapshot.plugins.iter().filter(|plugin| plugin.running).count();
+    let installed = snapshot
+        .plugins
+        .iter()
+        .filter(|plugin| plugin.installed_version.is_some())
+        .count();
+    let summary = format!("{installed} 已装 / {running} 运行中");
+    if let Ok(tray) = lock_tray(&state.tray) {
+        if let Some(tray) = tray.as_ref() {
+            host::update_tray(app, tray, &summary);
+        }
+    }
+    app.emit(SNAPSHOT_EVENT, &snapshot)
+        .map_err(|error| error.to_string())?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+async fn get_snapshot(app: AppHandle) -> Result<HostSnapshot, String> {
+    emit_snapshot(&app).await
+}
+
+#[tauri::command]
+async fn refresh_releases(app: AppHandle) -> Result<HostSnapshot, String> {
+    {
+        let state = app.state::<HostState>();
+        let mut plugins = state.plugins.lock().await;
+        plugins.refresh_latest()?;
+    }
+    emit_snapshot(&app).await
+}
+
+#[tauri::command]
+async fn install_plugin(app: AppHandle, id: String) -> Result<HostSnapshot, String> {
+    {
+        let state = app.state::<HostState>();
+        let mut plugins = state.plugins.lock().await;
+        plugins.install(&id)?;
+    }
+    emit_snapshot(&app).await
+}
+
+#[tauri::command]
+async fn uninstall_plugin(app: AppHandle, id: String) -> Result<HostSnapshot, String> {
+    {
+        let state = app.state::<HostState>();
+        let mut plugins = state.plugins.lock().await;
+        plugins.uninstall(&id)?;
+    }
+    emit_snapshot(&app).await
+}
+
+#[tauri::command]
+async fn set_plugin_enabled(
+    app: AppHandle,
+    id: String,
+    enabled: bool,
+) -> Result<HostSnapshot, String> {
+    {
+        let state = app.state::<HostState>();
+        let mut plugins = state.plugins.lock().await;
+        plugins.set_enabled(&id, enabled)?;
+    }
+    emit_snapshot(&app).await
+}
+
+#[tauri::command]
+async fn plugin_command(
+    app: AppHandle,
+    id: String,
+    cmd: String,
+) -> Result<HostSnapshot, String> {
+    {
+        let state = app.state::<HostState>();
+        let mut plugins = state.plugins.lock().await;
+        plugins.plugin_command(&id, &cmd).await?;
+    }
+    emit_snapshot(&app).await
+}
+
+#[tauri::command]
+async fn update_host_settings(
+    app: AppHandle,
+    auto_start_with_windows: bool,
+    start_minimized: bool,
+) -> Result<HostSnapshot, String> {
+    {
+        let state = app.state::<HostState>();
+        let mut plugins = state.plugins.lock().await;
+        plugins.set_autostart(auto_start_with_windows, start_minimized)?;
+        host::sync_autostart(auto_start_with_windows, start_minimized)?;
+    }
+    emit_snapshot(&app).await
+}
+
+#[tauri::command]
+async fn open_data_directory(state: State<'_, HostState>) -> Result<(), String> {
+    let plugins = state.plugins.lock().await;
+    host::open_data_directory(plugins.data_dir())
+}
+
+#[tauri::command]
+fn show_window(app: AppHandle) -> Result<(), String> {
+    host::show_main_window(&app);
+    Ok(())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            host::show_main_window(&app);
+        }))
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            let manager = PluginManager::load(data_directory())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+            let auto_start = manager.state().auto_start_with_windows;
+            let start_minimized = manager.state().start_minimized;
+            host::sync_autostart(auto_start, start_minimized).map_err(std::io::Error::other)?;
+            let state = HostState {
+                plugins: AsyncMutex::new(manager),
+                tray: Mutex::new(None),
+                quitting: AtomicBool::new(false),
+            };
+            {
+                let mut plugins = state.plugins.blocking_lock();
+                let _ = plugins.refresh_latest();
+                plugins.start_enabled();
+            }
+            app.manage(state);
+            let tray = host::setup_tray(app.handle()).map_err(std::io::Error::other)?;
+            {
+                let managed = app.state::<HostState>();
+                *lock_tray(&managed.tray).map_err(std::io::Error::other)? = Some(tray);
+            }
+            let start_hidden = start_minimized
+                || std::env::args().any(|argument| argument == "--hidden");
+            if !start_hidden {
+                host::show_main_window(app.handle());
+            }
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = emit_snapshot(&handle).await;
+            });
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let app = window.app_handle().clone();
+                let state = app.state::<HostState>();
+                if state.quitting.load(Ordering::SeqCst) {
+                    return;
+                }
+                let _ = window.hide();
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_snapshot,
+            refresh_releases,
+            install_plugin,
+            uninstall_plugin,
+            set_plugin_enabled,
+            plugin_command,
+            update_host_settings,
+            open_data_directory,
+            show_window
+        ])
+        .run(tauri::generate_context!())
+        .expect("运行 Background Studio 失败");
+}
