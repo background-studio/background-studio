@@ -81,7 +81,10 @@ pub struct PluginManager {
     state: PluginsState,
     children: HashMap<String, Child>,
     latest: HashMap<String, (String, String)>,
+    /// 最近一次为该插件查询最新版失败的原因（限流 / 无资产等）。
+    latest_errors: HashMap<String, String>,
     host_release: host_update::HostReleaseInfo,
+    host_release_error: Option<String>,
 }
 
 impl PluginManager {
@@ -125,7 +128,9 @@ impl PluginManager {
             state,
             children: HashMap::new(),
             latest: HashMap::new(),
+            latest_errors: HashMap::new(),
             host_release: host_update::HostReleaseInfo::default(),
+            host_release_error: None,
         };
         manager.save()?;
         Ok(manager)
@@ -236,15 +241,23 @@ impl PluginManager {
             match fetch_latest_plugin_asset(&plugin) {
                 Ok((version, asset)) => {
                     self.latest.insert(plugin.id.clone(), (version, asset));
+                    self.latest_errors.remove(&plugin.id);
                 }
                 Err(error) => {
                     eprintln!("刷新 {} 最新版本失败：{error}", plugin.id);
+                    self.latest_errors.insert(plugin.id.clone(), error);
                 }
             }
         }
         match host_update::fetch_latest_host_release() {
-            Ok(info) => self.host_release = info,
-            Err(error) => eprintln!("刷新壳最新版本失败：{error}"),
+            Ok(info) => {
+                self.host_release = info;
+                self.host_release_error = None;
+            }
+            Err(error) => {
+                eprintln!("刷新壳最新版本失败：{error}");
+                self.host_release_error = Some(error);
+            }
         }
         Ok(())
     }
@@ -275,11 +288,17 @@ impl PluginManager {
         if !self.latest.contains_key(id) {
             self.refresh_latest()?;
         }
-        let (version, asset_name) = self
-            .latest
-            .get(id)
-            .cloned()
-            .ok_or_else(|| format!("找不到 {id} 的最新 Release（需要带 *-plugin.zip 的发布）。"))?;
+        let (version, asset_name) = match self.latest.get(id).cloned() {
+            Some(pair) => pair,
+            None => {
+                if let Some(error) = self.latest_errors.get(id) {
+                    return Err(format!("无法获取 {id} 的最新版：{error}"));
+                }
+                return Err(format!(
+                    "找不到 {id} 的最新 Release（需要带 *-plugin.zip 的发布）。请先点「检查更新」。"
+                ));
+            }
+        };
         let version_dir = version.trim_start_matches('v').to_string();
         let tag = format!("v{version_dir}");
         let (owner, repo, exe_name) = {
@@ -456,8 +475,9 @@ impl PluginManager {
 
     pub async fn snapshot(&mut self) -> HostSnapshot {
         let mut cards = Vec::new();
-        let warning = detect_standalone_warning();
+        let mut warning = detect_standalone_warning();
         let catalog = self.catalog.clone();
+        let mut refresh_failures: Vec<String> = Vec::new();
         for plugin in catalog {
             let record = self
                 .state
@@ -476,9 +496,18 @@ impl PluginManager {
                 .cloned()
                 .map(|(version, asset)| (Some(version), Some(asset)))
                 .unwrap_or((None, None));
+            if latest_version.is_none() {
+                if let Some(error) = self.latest_errors.get(&plugin.id) {
+                    refresh_failures.push(format!("{}：{error}", plugin.display_name));
+                }
+            }
             let running = self.is_running(&plugin.id);
             let mut status_message = if record.installed_version.is_none() {
-                "未安装".to_string()
+                if let Some(error) = self.latest_errors.get(&plugin.id) {
+                    format!("未安装 · {error}")
+                } else {
+                    "未安装".to_string()
+                }
             } else if !record.enabled {
                 "未启用".to_string()
             } else if running {
@@ -533,6 +562,16 @@ impl PluginManager {
         let host_update_available = host_latest_version
             .as_deref()
             .is_some_and(|latest| host_update::version_newer(latest, &host_version));
+        if let Some(error) = &self.host_release_error {
+            refresh_failures.push(format!("壳：{error}"));
+        }
+        if !refresh_failures.is_empty() {
+            let detail = refresh_failures.join("；");
+            warning = Some(match warning {
+                Some(existing) => format!("{existing} 检查更新失败：{detail}"),
+                None => format!("检查更新失败：{detail}"),
+            });
+        }
         HostSnapshot {
             plugins: cards,
             auto_start_with_windows: self.state.auto_start_with_windows,
@@ -576,18 +615,26 @@ fn fetch_latest_plugin_asset(spec: &PluginDef) -> Result<(String, String), Strin
         spec.owner, spec.repo
     );
     let response = reqwest::blocking::Client::new()
-        .get(url)
+        .get(&url)
         .header("User-Agent", "BackgroundStudioHost/0.1")
         .header("Accept", "application/vnd.github+json")
         .send()
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?;
-    let value: Value = response.json().map_err(|error| error.to_string())?;
+        .map_err(|error| format!("请求 GitHub 失败：{error}"))?;
+    let status = response.status();
+    let body = response.text().map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        return Err(host_update::format_github_api_error(status.as_u16(), &body));
+    }
+    let value: Value = serde_json::from_str(&body).map_err(|error| error.to_string())?;
+    if value.get("message").and_then(|m| m.as_str()).is_some_and(|m| {
+        m.to_ascii_lowercase().contains("rate limit")
+    }) {
+        return Err(host_update::format_github_api_error(403, &body));
+    }
     let tag = value
         .get("tag_name")
         .and_then(|tag| tag.as_str())
-        .ok_or_else(|| "Release 缺少 tag_name".to_string())?
+        .ok_or_else(|| "Release 缺少 tag_name（仓库可能还没有正式发布）。".to_string())?
         .to_string();
     let assets = value
         .get("assets")
@@ -597,7 +644,12 @@ fn fetch_latest_plugin_asset(spec: &PluginDef) -> Result<(String, String), Strin
         .iter()
         .filter_map(|asset| asset.get("name").and_then(|name| name.as_str()))
         .find(|name| name.starts_with(&spec.asset_prefix) && name.ends_with("-plugin.zip"))
-        .ok_or_else(|| format!("Release 中没有 {}*-plugin.zip", spec.asset_prefix))?
+        .ok_or_else(|| {
+            format!(
+                "最新 Release {} 中没有 {}*-plugin.zip",
+                tag, spec.asset_prefix
+            )
+        })?
         .to_string();
     Ok((tag.trim_start_matches('v').to_string(), asset))
 }

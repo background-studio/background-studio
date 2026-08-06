@@ -62,6 +62,26 @@ fn compare_semver(a: &str, b: &str) -> std::cmp::Ordering {
     std::cmp::Ordering::Equal
 }
 
+pub fn format_github_api_error(status: u16, body: &str) -> String {
+    let lower = body.to_ascii_lowercase();
+    if status == 403 && lower.contains("rate limit") {
+        return "GitHub API 限流（未登录约 60 次/小时/IP），请稍后点「检查更新」重试".to_string();
+    }
+    if status == 404 {
+        return "GitHub 上找不到最新 Release（仓库可能尚未发布）。".to_string();
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(body) {
+        if let Some(message) = value.get("message").and_then(|m| m.as_str()) {
+            if message.to_ascii_lowercase().contains("rate limit") {
+                return "GitHub API 限流（未登录约 60 次/小时/IP），请稍后点「检查更新」重试"
+                    .to_string();
+            }
+            return format!("GitHub API {status}：{message}");
+        }
+    }
+    format!("GitHub API 请求失败（HTTP {status}）")
+}
+
 pub fn fetch_latest_host_release() -> Result<HostReleaseInfo, String> {
     let url = format!("https://api.github.com/repos/{HOST_OWNER}/{HOST_REPO}/releases/latest");
     let response = reqwest::blocking::Client::new()
@@ -69,10 +89,13 @@ pub fn fetch_latest_host_release() -> Result<HostReleaseInfo, String> {
         .header("User-Agent", "BackgroundStudioHost/0.1")
         .header("Accept", "application/vnd.github+json")
         .send()
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?;
-    let value: Value = response.json().map_err(|error| error.to_string())?;
+        .map_err(|error| format!("请求 GitHub 失败：{error}"))?;
+    let status = response.status();
+    let body = response.text().map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        return Err(format_github_api_error(status.as_u16(), &body));
+    }
+    let value: Value = serde_json::from_str(&body).map_err(|error| error.to_string())?;
     let tag = value
         .get("tag_name")
         .and_then(|tag| tag.as_str())
@@ -114,6 +137,27 @@ pub fn fetch_latest_host_release() -> Result<HostReleaseInfo, String> {
         release_url: Some(html_url),
         download_url: Some(download_url),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_github_api_error;
+
+    #[test]
+    fn maps_rate_limit_to_chinese_hint() {
+        let message = format_github_api_error(
+            403,
+            r#"{"message":"API rate limit exceeded for 1.2.3.4."}"#,
+        );
+        assert!(message.contains("限流"));
+        assert!(message.contains("检查更新"));
+    }
+
+    #[test]
+    fn maps_404_to_missing_release() {
+        let message = format_github_api_error(404, r#"{"message":"Not Found"}"#);
+        assert!(message.contains("找不到最新 Release"));
+    }
 }
 
 pub fn emit_progress(app: &AppHandle, phase: &str, percent: Option<f64>, message: &str) {

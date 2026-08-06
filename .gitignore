@@ -8,6 +8,5 @@ src-tauri/target
 .vscode
 app-icon-source.png
 *.code-workspace
-
-*.code-workspace
+poc/
 
