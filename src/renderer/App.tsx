@@ -16,7 +16,7 @@ import {
   type PluginCard,
 } from "./bridge";
 
-const APP_VERSION = "0.1.1";
+const APP_VERSION = "0.1.2";
 
 export function App() {
   const [snapshot, setSnapshot] = useState<HostSnapshot | null>(null);

@@ -95,6 +95,7 @@ pub fn resolve_icon_path(data_dir: &Path, plugin: &PluginDef) -> Option<PathBuf>
 pub fn sync_bundled_icons(data_dir: &Path) -> Result<(), String> {
     let icons = data_dir.join("icons");
     fs::create_dir_all(&icons).map_err(|error| error.to_string())?;
+    // 内置三件套每次启动覆盖写入，避免旧错误图标（如 Notion 误用组织标）残留。
     for (name, bytes) in [
         ("codex.png", include_bytes!("../resources/codex.png").as_slice()),
         ("notion.png", include_bytes!("../resources/notion.png").as_slice()),
@@ -104,15 +105,7 @@ pub fn sync_bundled_icons(data_dir: &Path) -> Result<(), String> {
         ),
     ] {
         let path = icons.join(name);
-        if !path.exists() {
-            fs::write(&path, bytes).map_err(|error| error.to_string())?;
-        }
-        // 同时按 id 名一份，方便前端统一用 {id}.png
-        let id_name = name.trim_end_matches(".png");
-        let aliased = icons.join(format!("{id_name}.png"));
-        if !aliased.exists() {
-            let _ = fs::copy(&path, &aliased);
-        }
+        fs::write(&path, bytes).map_err(|error| error.to_string())?;
     }
     Ok(())
 }
