@@ -46,8 +46,11 @@ export type HostUpdateProgress = {
 const SNAPSHOT_EVENT = "host:snapshot-changed";
 const INSTALL_PROGRESS_EVENT = "host:install-progress";
 const HOST_UPDATE_PROGRESS_EVENT = "host:host-update-progress";
+const NOTION_PLUGIN_ICON = "/plugins/notion.png";
 
 export function pluginIconSrc(plugin: PluginCard): string {
+  // Notion 卡片统一使用前端随壳发布的视觉资产，避免数据目录里旧的同步图标覆盖它。
+  if (plugin.id === "notion") return NOTION_PLUGIN_ICON;
   if (plugin.iconPath) {
     try {
       return convertFileSrc(plugin.iconPath);
