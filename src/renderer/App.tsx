@@ -3,6 +3,8 @@ import {
   chooseDataDirectory,
   getSnapshot,
   installPlugin,
+  onHostUpdateProgress,
+  onInstallProgress,
   onSnapshot,
   openDataDirectory,
   pluginCommand,
@@ -11,33 +13,50 @@ import {
   reloadCatalog,
   setPluginEnabled,
   uninstallPlugin,
+  updateHost,
   updateHostSettings,
   type HostSnapshot,
+  type HostUpdateProgress,
+  type InstallProgress,
   type PluginCard,
 } from "./bridge";
-
-const APP_VERSION = "0.1.2";
 
 export function App() {
   const [snapshot, setSnapshot] = useState<HostSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [installProgress, setInstallProgress] = useState<InstallProgress | null>(null);
+  const [hostProgress, setHostProgress] = useState<HostUpdateProgress | null>(null);
   const [, startTransition] = useTransition();
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
+    const unlisteners: Array<() => void> = [];
     (async () => {
       try {
         setSnapshot(await getSnapshot());
-        unlisten = await onSnapshot((next) => {
-          startTransition(() => setSnapshot(next));
-        });
+        unlisteners.push(
+          await onSnapshot((next) => {
+            startTransition(() => setSnapshot(next));
+          }),
+        );
+        unlisteners.push(
+          await onInstallProgress((progress) => {
+            setInstallProgress(progress.phase === "done" ? null : progress);
+          }),
+        );
+        unlisteners.push(
+          await onHostUpdateProgress((progress) => {
+            setHostProgress(progress);
+          }),
+        );
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       }
     })();
     return () => {
-      unlisten?.();
+      for (const unlisten of unlisteners) {
+        unlisten();
+      }
     };
   }, []);
 
@@ -50,6 +69,20 @@ export function App() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusyId(null);
+      setInstallProgress(null);
+    }
+  }
+
+  async function runHostUpdate() {
+    setBusyId("host-update");
+    setError(null);
+    setHostProgress({ phase: "download", percent: 0, message: "准备更新壳…" });
+    try {
+      await updateHost();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setBusyId(null);
+      setHostProgress(null);
     }
   }
 
@@ -73,9 +106,17 @@ export function App() {
           <p>一个托盘管理背景插件</p>
         </div>
         <div className="brand-foot">
-          版本 {APP_VERSION}
+          版本 {snapshot.hostVersion}
           <br />
           插件列表来自 catalog，可动态扩展
+          {snapshot.hostUpdateAvailable ? (
+            <>
+              <br />
+              <span className="host-update-hint">
+                可更新到 v{snapshot.hostLatestVersion}
+              </span>
+            </>
+          ) : null}
         </div>
       </aside>
 
@@ -100,8 +141,38 @@ export function App() {
             >
               检查更新
             </button>
+            {snapshot.hostUpdateAvailable ? (
+              <button
+                className="btn primary"
+                disabled={busyId !== null}
+                onClick={() => void runHostUpdate()}
+              >
+                更新壳
+              </button>
+            ) : null}
           </div>
         </header>
+
+        {snapshot.hostUpdateAvailable ? (
+          <div className="update-banner">
+            Background Studio 可更新到 v{snapshot.hostLatestVersion}。
+            点「更新壳」下载并启动安装程序；若用 Scoop 安装，也可用{" "}
+            <code>scoop update background-studio</code>。
+            {hostProgress ? (
+              <div className="progress-block">
+                <div className="progress-label">{hostProgress.message}</div>
+                <div className="progress-track">
+                  <div
+                    className="progress-fill"
+                    style={{
+                      width: `${Math.max(hostProgress.percent ?? 8, 8)}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
 
         {snapshot.warning ? <div className="warning">{snapshot.warning}</div> : null}
 
@@ -111,6 +182,9 @@ export function App() {
               key={plugin.id}
               plugin={plugin}
               busy={busyId !== null}
+              progress={
+                installProgress?.id === plugin.id ? installProgress : null
+              }
               onInstall={() => run(plugin.id, () => installPlugin(plugin.id))}
               onUninstall={() => run(plugin.id, () => uninstallPlugin(plugin.id))}
               onToggle={(enabled) =>
@@ -190,15 +264,17 @@ export function App() {
 function PluginCardView(props: {
   plugin: PluginCard;
   busy: boolean;
+  progress: InstallProgress | null;
   onInstall: () => void;
   onUninstall: () => void;
   onToggle: (enabled: boolean) => void;
   onCommand: (cmd: string) => void;
 }) {
-  const { plugin, busy } = props;
+  const { plugin, busy, progress } = props;
   const installed = Boolean(plugin.installedVersion);
   const [brokenIcon, setBrokenIcon] = useState(false);
   const icon = pluginIconSrc(plugin);
+  const installing = Boolean(progress);
 
   return (
     <article className="card">
@@ -219,7 +295,7 @@ function PluginCardView(props: {
         <h3>{plugin.displayName}</h3>
         <div className="meta">
           <span className={plugin.enabled && installed ? "ok" : undefined}>
-            {plugin.statusMessage}
+            {progress?.message ?? plugin.statusMessage}
           </span>
           <span>
             {plugin.installedVersion
@@ -231,12 +307,31 @@ function PluginCardView(props: {
           <span>{plugin.targetHint}</span>
           {plugin.updateAvailable ? <span>可更新</span> : null}
         </div>
+        {progress ? (
+          <div className="progress-block">
+            <div className="progress-track">
+              <div
+                className="progress-fill"
+                style={{
+                  width:
+                    progress.percent == null
+                      ? "35%"
+                      : `${Math.max(progress.percent, 4)}%`,
+                }}
+              />
+            </div>
+          </div>
+        ) : null}
       </div>
 
       <div className="card-actions">
         {!installed ? (
-          <button className="btn primary" disabled={busy} onClick={props.onInstall}>
-            安装
+          <button
+            className="btn primary"
+            disabled={busy}
+            onClick={props.onInstall}
+          >
+            {installing ? "安装中…" : "安装"}
           </button>
         ) : (
           <>
@@ -262,7 +357,11 @@ function PluginCardView(props: {
               应用
             </button>
             <button className="btn" disabled={busy} onClick={props.onInstall}>
-              {plugin.updateAvailable ? "更新" : "重装"}
+              {installing
+                ? "更新中…"
+                : plugin.updateAvailable
+                  ? "更新"
+                  : "重装"}
             </button>
             <button className="btn danger" disabled={busy} onClick={props.onUninstall}>
               卸载

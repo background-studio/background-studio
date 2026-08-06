@@ -71,8 +71,21 @@ jobs:
             - 白底扁平 UI；左侧为组织品牌图标
             - 插件列表由 catalog 动态加载（内置 Codex / Notion / Multica，可本地扩展）
             - 支持更改插件数据目录
+            - 插件安装进度；壳自身可检查更新
+            - Scoop：`scoop bucket add background-studio https://github.com/background-studio/scoop-bucket`
 
             安装后请在界面中从各自 Release 安装插件（`*-plugin.zip`）。
             动态加插件与迁移说明见 `docs/plugin-protocol.md`、`docs/migration.md`。
           releaseDraft: false
           prerelease: false
+
+      - name: Notify scoop-bucket to sync manifest
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN || github.token }}
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          gh api repos/background-studio/scoop-bucket/dispatches `
+            -f event_type=host-release `
+            -f "client_payload[version]=$version"

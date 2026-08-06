@@ -1,18 +1,29 @@
 use std::{
     collections::HashMap,
     fs::{self, File},
-    io::Write,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tauri::{AppHandle, Emitter};
 
 use crate::{
     catalog::{self, PluginDef, PLUGIN_PROTOCOL},
-    config, ipc,
+    config, host_update, ipc,
 };
+
+pub const INSTALL_PROGRESS_EVENT: &str = "host:install-progress";
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallProgress {
+    pub id: String,
+    pub phase: String,
+    pub percent: Option<f64>,
+    pub message: String,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +69,10 @@ pub struct HostSnapshot {
     pub start_minimized: bool,
     pub data_directory: String,
     pub warning: Option<String>,
+    pub host_version: String,
+    pub host_latest_version: Option<String>,
+    pub host_update_available: bool,
+    pub host_release_url: Option<String>,
 }
 
 pub struct PluginManager {
@@ -66,6 +81,7 @@ pub struct PluginManager {
     state: PluginsState,
     children: HashMap<String, Child>,
     latest: HashMap<String, (String, String)>,
+    host_release: host_update::HostReleaseInfo,
 }
 
 impl PluginManager {
@@ -109,6 +125,7 @@ impl PluginManager {
             state,
             children: HashMap::new(),
             latest: HashMap::new(),
+            host_release: host_update::HostReleaseInfo::default(),
         };
         manager.save()?;
         Ok(manager)
@@ -225,10 +242,36 @@ impl PluginManager {
                 }
             }
         }
+        match host_update::fetch_latest_host_release() {
+            Ok(info) => self.host_release = info,
+            Err(error) => eprintln!("刷新壳最新版本失败：{error}"),
+        }
         Ok(())
     }
 
-    pub fn install(&mut self, id: &str) -> Result<(), String> {
+    pub fn host_release(&self) -> &host_update::HostReleaseInfo {
+        &self.host_release
+    }
+
+    fn emit_install_progress(
+        app: &AppHandle,
+        id: &str,
+        phase: &str,
+        percent: Option<f64>,
+        message: &str,
+    ) {
+        let _ = app.emit(
+            INSTALL_PROGRESS_EVENT,
+            InstallProgress {
+                id: id.to_string(),
+                phase: phase.to_string(),
+                percent,
+                message: message.to_string(),
+            },
+        );
+    }
+
+    pub fn install(&mut self, id: &str, app: &AppHandle) -> Result<(), String> {
         if !self.latest.contains_key(id) {
             self.refresh_latest()?;
         }
@@ -247,7 +290,26 @@ impl PluginManager {
             "https://github.com/{owner}/{repo}/releases/download/{tag}/{asset_name}"
         );
         let zip_path = self.data_dir.join(format!("{id}-{version_dir}-plugin.zip"));
-        download_file(&download_url, &zip_path)?;
+        Self::emit_install_progress(app, id, "download", Some(0.0), "开始下载…");
+        let mut last_reported = 0u8;
+        host_update::download_with_progress(&download_url, &zip_path, |downloaded, total| {
+            let percent = match total {
+                Some(total) if total > 0 => (downloaded as f64 / total as f64) * 100.0,
+                _ => 0.0,
+            };
+            let bucket = percent.floor() as u8 / 2;
+            if bucket != last_reported || downloaded == total.unwrap_or(downloaded) {
+                last_reported = bucket;
+                Self::emit_install_progress(
+                    app,
+                    id,
+                    "download",
+                    Some(percent),
+                    &format!("下载中 {percent:.0}%"),
+                );
+            }
+        })?;
+        Self::emit_install_progress(app, id, "extract", None, "解压中…");
         let target = self.install_dir(id, &version_dir);
         if target.exists() {
             fs::remove_dir_all(&target).map_err(|error| error.to_string())?;
@@ -259,6 +321,7 @@ impl PluginManager {
         if !exe.exists() {
             return Err(format!("插件包缺少可执行文件：{exe_name}"));
         }
+        Self::emit_install_progress(app, id, "start", None, "启动中…");
         let _ = self.stop(id);
         {
             let record = self.record_mut(id)?;
@@ -267,6 +330,7 @@ impl PluginManager {
         }
         self.save()?;
         self.start(id)?;
+        Self::emit_install_progress(app, id, "done", Some(100.0), "安装完成");
         Ok(())
     }
 
@@ -464,27 +528,23 @@ impl PluginManager {
                 icon_web: format!("/plugins/{}.png", plugin.id),
             });
         }
+        let host_version = host_update::current_version();
+        let host_latest_version = self.host_release.latest_version.clone();
+        let host_update_available = host_latest_version
+            .as_deref()
+            .is_some_and(|latest| host_update::version_newer(latest, &host_version));
         HostSnapshot {
             plugins: cards,
             auto_start_with_windows: self.state.auto_start_with_windows,
             start_minimized: self.state.start_minimized,
             data_directory: self.data_dir.to_string_lossy().into_owned(),
             warning,
+            host_version,
+            host_latest_version,
+            host_update_available,
+            host_release_url: self.host_release.release_url.clone(),
         }
     }
-}
-
-fn download_file(url: &str, path: &Path) -> Result<(), String> {
-    let response = reqwest::blocking::Client::new()
-        .get(url)
-        .header("User-Agent", "BackgroundStudioHost/0.1")
-        .send()
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?;
-    let bytes = response.bytes().map_err(|error| error.to_string())?;
-    let mut file = File::create(path).map_err(|error| error.to_string())?;
-    file.write_all(&bytes).map_err(|error| error.to_string())
 }
 
 fn extract_zip(zip_path: &Path, target: &Path) -> Result<(), String> {

@@ -133,6 +133,54 @@ button {
   font-size: 0.9rem;
 }
 
+.update-banner {
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid #a5f3fc;
+  background: var(--accent-soft);
+  color: #155e75;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.update-banner code {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.84em;
+  background: rgba(255, 255, 255, 0.7);
+  padding: 1px 6px;
+  border-radius: 6px;
+}
+
+.host-update-hint {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.progress-block {
+  margin-top: 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.progress-label {
+  font-size: 0.84rem;
+  color: var(--muted);
+}
+
+.progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: #e5e7eb;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent-hi), var(--accent));
+  transition: width 120ms ease;
+}
+
 .list {
   display: grid;
   gap: 12px;

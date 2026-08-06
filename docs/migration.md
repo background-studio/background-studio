@@ -2,9 +2,12 @@
 
 ## 推荐用法
 
-1. 安装 [Background Studio](https://github.com/background-studio/background-studio/releases) 壳
+1. 安装 Background Studio 壳（NSIS Release，或 Scoop：
+   `scoop bucket add background-studio https://github.com/background-studio/scoop-bucket` → `scoop install background-studio`）
 2. 在壳里分别安装 Codex / Notion / Multica 插件（从各自仓库 Release 下载 `*-plugin.zip`）
 3. Windows 托盘只保留 **Background Studio** 一个图标
+
+壳更新：界面「检查更新」后点「更新壳」，或 `scoop update background-studio`。
 
 ## 独立版怎么办
 
@@ -39,3 +42,4 @@
 | Codex 插件 | [codex_desktop_background](https://github.com/background-studio/codex_desktop_background) |
 | Notion 插件 | [notion_desktop_background](https://github.com/background-studio/notion_desktop_background) |
 | Multica 插件 | [multica_desktop_background](https://github.com/background-studio/multica_desktop_background) |
+| Scoop bucket | [scoop-bucket](https://github.com/background-studio/scoop-bucket) |

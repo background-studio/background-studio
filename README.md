@@ -12,12 +12,27 @@
 
 > 非 OpenAI / Notion / Multica 官方产品。
 
+## 安装
+
+### NSIS
+
+从 [Releases](https://github.com/background-studio/background-studio/releases) 下载 `Background.Studio_*_x64-setup.exe`。
+
+### Scoop
+
+```powershell
+scoop bucket add background-studio https://github.com/background-studio/scoop-bucket
+scoop install background-studio
+scoop update background-studio
+```
+
 ## 功能
 
 - 单托盘宿主机
-- 从 GitHub Release 安装 / 更新 / 卸载插件
+- 从 GitHub Release 安装 / 更新 / 卸载插件（带下载进度）
 - 启用后以 `--plugin` 启动 worker（无独立托盘）
 - Named Pipe 汇总状态，并转发打开设置 / 应用 / 暂停 / 恢复
+- 「检查更新」同时检查插件与壳自身；可下载并启动壳安装包
 - 仅注册壳自己的开机启动
 - 检测到独立版自启动时提示，避免双托盘（不自动卸载）
 
@@ -43,8 +58,8 @@ npm run package:win
 ## 发布
 
 ```powershell
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 推送 `v*` 标签后，GitHub Actions 构建 NSIS 并创建 Release。

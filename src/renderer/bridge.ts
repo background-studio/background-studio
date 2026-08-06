@@ -24,9 +24,28 @@ export type HostSnapshot = {
   startMinimized: boolean;
   dataDirectory: string;
   warning: string | null;
+  hostVersion: string;
+  hostLatestVersion: string | null;
+  hostUpdateAvailable: boolean;
+  hostReleaseUrl: string | null;
+};
+
+export type InstallProgress = {
+  id: string;
+  phase: string;
+  percent: number | null;
+  message: string;
+};
+
+export type HostUpdateProgress = {
+  phase: string;
+  percent: number | null;
+  message: string;
 };
 
 const SNAPSHOT_EVENT = "host:snapshot-changed";
+const INSTALL_PROGRESS_EVENT = "host:install-progress";
+const HOST_UPDATE_PROGRESS_EVENT = "host:host-update-progress";
 
 export function pluginIconSrc(plugin: PluginCard): string {
   if (plugin.iconPath) {
@@ -85,8 +104,26 @@ export async function chooseDataDirectory(): Promise<HostSnapshot> {
   return invoke("choose_data_directory");
 }
 
+export async function updateHost(): Promise<void> {
+  return invoke("update_host");
+}
+
 export async function onSnapshot(
   handler: (snapshot: HostSnapshot) => void,
 ): Promise<UnlistenFn> {
   return listen<HostSnapshot>(SNAPSHOT_EVENT, (event) => handler(event.payload));
+}
+
+export async function onInstallProgress(
+  handler: (progress: InstallProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<InstallProgress>(INSTALL_PROGRESS_EVENT, (event) => handler(event.payload));
+}
+
+export async function onHostUpdateProgress(
+  handler: (progress: HostUpdateProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<HostUpdateProgress>(HOST_UPDATE_PROGRESS_EVENT, (event) =>
+    handler(event.payload),
+  );
 }

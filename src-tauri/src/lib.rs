@@ -1,6 +1,7 @@
 mod catalog;
 mod config;
 mod host;
+mod host_update;
 mod ipc;
 mod plugins;
 
@@ -84,7 +85,7 @@ async fn install_plugin(app: AppHandle, id: String) -> Result<HostSnapshot, Stri
     {
         let state = app.state::<HostState>();
         let mut plugins = state.plugins.lock().await;
-        plugins.install(&id)?;
+        plugins.install(&id, &app)?;
     }
     emit_snapshot(&app).await
 }
@@ -168,6 +169,57 @@ async fn choose_data_directory(app: AppHandle) -> Result<HostSnapshot, String> {
 }
 
 #[tauri::command]
+async fn update_host(app: AppHandle) -> Result<(), String> {
+    let release = {
+        let state = app.state::<HostState>();
+        let mut plugins = state.plugins.lock().await;
+        if plugins.host_release().download_url.is_none()
+            || plugins.host_release().asset_name.is_none()
+        {
+            plugins.refresh_latest()?;
+        }
+        plugins.host_release().clone()
+    };
+
+    let download_url = release
+        .download_url
+        .ok_or_else(|| "找不到壳安装包下载地址。".to_string())?;
+    let asset_name = release
+        .asset_name
+        .ok_or_else(|| "找不到壳安装包文件名。".to_string())?;
+    let latest = release
+        .latest_version
+        .unwrap_or_else(|| "最新".to_string());
+    if !host_update::version_newer(&latest, &host_update::current_version()) {
+        return Err("当前已是最新版本。".to_string());
+    }
+
+    let installer = host_update::installer_temp_path(&asset_name);
+    host_update::emit_progress(&app, "download", Some(0.0), "开始下载壳安装包…");
+    let mut last_reported = 0u8;
+    host_update::download_with_progress(&download_url, &installer, |downloaded, total| {
+        let percent = match total {
+            Some(total) if total > 0 => (downloaded as f64 / total as f64) * 100.0,
+            _ => 0.0,
+        };
+        let bucket = percent.floor() as u8 / 2;
+        if bucket != last_reported || downloaded == total.unwrap_or(downloaded) {
+            last_reported = bucket;
+            host_update::emit_progress(
+                &app,
+                "download",
+                Some(percent),
+                &format!("下载壳更新 {percent:.0}%"),
+            );
+        }
+    })?;
+    host_update::emit_progress(&app, "launch", None, "正在启动安装程序…");
+    host_update::launch_installer(&installer)?;
+    host::quit_keep_targets(app);
+    Ok(())
+}
+
+#[tauri::command]
 fn show_window(app: AppHandle) -> Result<(), String> {
     host::show_main_window(&app);
     Ok(())
@@ -237,6 +289,7 @@ pub fn run() {
             update_host_settings,
             open_data_directory,
             choose_data_directory,
+            update_host,
             show_window
         ])
         .run(tauri::generate_context!())
