@@ -2,12 +2,22 @@ use std::{
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    sync::OnceLock,
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// 进程内缓存：本机 `gh` 是否已登录。未装 / 未登录时静默走匿名 HTTP。
+static GH_AUTHENTICATED: OnceLock<bool> = OnceLock::new();
 
 pub const HOST_OWNER: &str = "background-studio";
 pub const HOST_REPO: &str = "background-studio";
@@ -62,10 +72,12 @@ fn compare_semver(a: &str, b: &str) -> std::cmp::Ordering {
     std::cmp::Ordering::Equal
 }
 
+const RATE_LIMIT_HINT: &str = "GitHub API 限流（未登录约 60 次/小时/IP）。若本机已安装 GitHub CLI，可先执行 gh auth login 后再点「检查更新」";
+
 pub fn format_github_api_error(status: u16, body: &str) -> String {
     let lower = body.to_ascii_lowercase();
     if status == 403 && lower.contains("rate limit") {
-        return "GitHub API 限流（未登录约 60 次/小时/IP），请稍后点「检查更新」重试".to_string();
+        return RATE_LIMIT_HINT.to_string();
     }
     if status == 404 {
         return "GitHub 上找不到最新 Release（仓库可能尚未发布）。".to_string();
@@ -73,8 +85,7 @@ pub fn format_github_api_error(status: u16, body: &str) -> String {
     if let Ok(value) = serde_json::from_str::<Value>(body) {
         if let Some(message) = value.get("message").and_then(|m| m.as_str()) {
             if message.to_ascii_lowercase().contains("rate limit") {
-                return "GitHub API 限流（未登录约 60 次/小时/IP），请稍后点「检查更新」重试"
-                    .to_string();
+                return RATE_LIMIT_HINT.to_string();
             }
             return format!("GitHub API {status}：{message}");
         }
@@ -82,8 +93,73 @@ pub fn format_github_api_error(status: u16, body: &str) -> String {
     format!("GitHub API 请求失败（HTTP {status}）")
 }
 
-pub fn fetch_latest_host_release() -> Result<HostReleaseInfo, String> {
-    let url = format!("https://api.github.com/repos/{HOST_OWNER}/{HOST_REPO}/releases/latest");
+fn configure_no_window(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
+fn gh_authenticated() -> bool {
+    *GH_AUTHENTICATED.get_or_init(|| {
+        let mut command = Command::new("gh");
+        command
+            .args(["auth", "status"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        configure_no_window(&mut command);
+        match command.status() {
+            Ok(status) => status.success(),
+            Err(_) => false,
+        }
+    })
+}
+
+fn reject_rate_limit_payload(value: &Value, body: &str) -> Result<(), String> {
+    if value
+        .get("message")
+        .and_then(|message| message.as_str())
+        .is_some_and(|message| message.to_ascii_lowercase().contains("rate limit"))
+    {
+        return Err(format_github_api_error(403, body));
+    }
+    Ok(())
+}
+
+fn github_api_get_via_gh(api_path: &str) -> Result<Value, String> {
+    let mut command = Command::new("gh");
+    command.args(["api", api_path]);
+    configure_no_window(&mut command);
+    let output = command
+        .output()
+        .map_err(|error| format!("调用 gh api 失败：{error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !output.status.success() {
+        let body = if !stdout.is_empty() { &stdout } else { &stderr };
+        if let Ok(value) = serde_json::from_str::<Value>(body) {
+            reject_rate_limit_payload(&value, body)?;
+            if let Some(message) = value.get("message").and_then(|message| message.as_str()) {
+                return Err(format!("gh api 失败：{message}"));
+            }
+        }
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            "未知错误".to_string()
+        };
+        return Err(format!("gh api 失败：{detail}"));
+    }
+    let value: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("解析 gh api 响应失败：{error}"))?;
+    reject_rate_limit_payload(&value, &stdout)?;
+    Ok(value)
+}
+
+fn github_api_get_via_http(api_path: &str) -> Result<Value, String> {
+    let url = format!("https://api.github.com/{api_path}");
     let response = reqwest::blocking::Client::new()
         .get(url)
         .header("User-Agent", "BackgroundStudioHost/0.1")
@@ -96,6 +172,24 @@ pub fn fetch_latest_host_release() -> Result<HostReleaseInfo, String> {
         return Err(format_github_api_error(status.as_u16(), &body));
     }
     let value: Value = serde_json::from_str(&body).map_err(|error| error.to_string())?;
+    reject_rate_limit_payload(&value, &body)?;
+    Ok(value)
+}
+
+/// 查 GitHub API JSON。本机已登录 `gh` 时优先走 `gh api`（已登录额度）；
+/// 否则匿名 HTTPS。已登录但 `gh api` 失败时不回退匿名。
+pub fn github_api_get(api_path: &str) -> Result<Value, String> {
+    if gh_authenticated() {
+        github_api_get_via_gh(api_path)
+    } else {
+        github_api_get_via_http(api_path)
+    }
+}
+
+pub fn fetch_latest_host_release() -> Result<HostReleaseInfo, String> {
+    let value = github_api_get(&format!(
+        "repos/{HOST_OWNER}/{HOST_REPO}/releases/latest"
+    ))?;
     let tag = value
         .get("tag_name")
         .and_then(|tag| tag.as_str())
@@ -151,6 +245,7 @@ mod tests {
         );
         assert!(message.contains("限流"));
         assert!(message.contains("检查更新"));
+        assert!(message.contains("gh auth login"));
     }
 
     #[test]

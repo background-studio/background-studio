@@ -610,27 +610,10 @@ fn extract_zip(zip_path: &Path, target: &Path) -> Result<(), String> {
 }
 
 fn fetch_latest_plugin_asset(spec: &PluginDef) -> Result<(String, String), String> {
-    let url = format!(
-        "https://api.github.com/repos/{}/{}/releases/latest",
+    let value = host_update::github_api_get(&format!(
+        "repos/{}/{}/releases/latest",
         spec.owner, spec.repo
-    );
-    let response = reqwest::blocking::Client::new()
-        .get(&url)
-        .header("User-Agent", "BackgroundStudioHost/0.1")
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .map_err(|error| format!("请求 GitHub 失败：{error}"))?;
-    let status = response.status();
-    let body = response.text().map_err(|error| error.to_string())?;
-    if !status.is_success() {
-        return Err(host_update::format_github_api_error(status.as_u16(), &body));
-    }
-    let value: Value = serde_json::from_str(&body).map_err(|error| error.to_string())?;
-    if value.get("message").and_then(|m| m.as_str()).is_some_and(|m| {
-        m.to_ascii_lowercase().contains("rate limit")
-    }) {
-        return Err(host_update::format_github_api_error(403, &body));
-    }
+    ))?;
     let tag = value
         .get("tag_name")
         .and_then(|tag| tag.as_str())
