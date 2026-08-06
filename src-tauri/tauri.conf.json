@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Background Studio",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "dev.backgroundstudio.host",
   "build": {
     "frontendDist": "../dist",
@@ -14,10 +14,10 @@
       {
         "label": "main",
         "title": "Background Studio",
-        "width": 960,
-        "height": 720,
-        "minWidth": 800,
-        "minHeight": 560,
+        "width": 1180,
+        "height": 760,
+        "minWidth": 980,
+        "minHeight": 640,
         "resizable": true,
         "fullscreen": false,
         "center": true,
@@ -25,7 +25,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
     }
   },
   "bundle": {

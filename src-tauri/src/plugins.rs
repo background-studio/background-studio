@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::{
     catalog::{self, PluginDef, PLUGIN_PROTOCOL},
-    ipc,
+    config, ipc,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -45,6 +45,9 @@ pub struct PluginCard {
     pub phase: String,
     pub plugin_protocol: u32,
     pub update_available: bool,
+    /// 本地图标绝对路径；前端用 convertFileSrc 显示。缺省时回退 /plugins/{id}.png
+    pub icon_path: Option<String>,
+    pub icon_web: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -59,6 +62,7 @@ pub struct HostSnapshot {
 
 pub struct PluginManager {
     data_dir: PathBuf,
+    catalog: Vec<PluginDef>,
     state: PluginsState,
     children: HashMap<String, Child>,
     latest: HashMap<String, (String, String)>,
@@ -66,6 +70,11 @@ pub struct PluginManager {
 
 impl PluginManager {
     pub fn load(data_dir: PathBuf) -> Result<Self, String> {
+        let bootstrap = config::bootstrap_directory();
+        catalog::ensure_default_overlay(&bootstrap)?;
+        catalog::sync_bundled_icons(&data_dir)?;
+        let catalog = catalog::load_catalog(&bootstrap)?;
+
         fs::create_dir_all(data_dir.join("plugins")).map_err(|error| error.to_string())?;
         let path = data_dir.join("plugins.json");
         let mut state = if path.exists() {
@@ -73,10 +82,10 @@ impl PluginManager {
             serde_json::from_str(&raw).map_err(|error| error.to_string())?
         } else {
             PluginsState {
-                plugins: catalog::PLUGINS
+                plugins: catalog
                     .iter()
                     .map(|plugin| PluginRecord {
-                        id: plugin.id.to_string(),
+                        id: plugin.id.clone(),
                         enabled: false,
                         installed_version: None,
                     })
@@ -85,10 +94,10 @@ impl PluginManager {
                 start_minimized: true,
             }
         };
-        for plugin in catalog::PLUGINS {
+        for plugin in &catalog {
             if !state.plugins.iter().any(|item| item.id == plugin.id) {
                 state.plugins.push(PluginRecord {
-                    id: plugin.id.to_string(),
+                    id: plugin.id.clone(),
                     enabled: false,
                     installed_version: None,
                 });
@@ -96,12 +105,28 @@ impl PluginManager {
         }
         let manager = Self {
             data_dir,
+            catalog,
             state,
             children: HashMap::new(),
             latest: HashMap::new(),
         };
         manager.save()?;
         Ok(manager)
+    }
+
+    pub fn reload_catalog(&mut self) -> Result<(), String> {
+        let bootstrap = config::bootstrap_directory();
+        self.catalog = catalog::load_catalog(&bootstrap)?;
+        for plugin in &self.catalog {
+            if !self.state.plugins.iter().any(|item| item.id == plugin.id) {
+                self.state.plugins.push(PluginRecord {
+                    id: plugin.id.clone(),
+                    enabled: false,
+                    installed_version: None,
+                });
+            }
+        }
+        self.save()
     }
 
     fn save(&self) -> Result<(), String> {
@@ -118,13 +143,61 @@ impl PluginManager {
         &self.state
     }
 
+    fn spec(&self, id: &str) -> Result<&PluginDef, String> {
+        catalog::find(&self.catalog, id).ok_or_else(|| format!("未知插件：{id}"))
+    }
+
     pub fn set_autostart(&mut self, enabled: bool, start_minimized: bool) -> Result<(), String> {
         self.state.auto_start_with_windows = enabled;
         self.state.start_minimized = start_minimized;
         self.save()
     }
 
+    pub fn relocate_data_directory(&mut self, new_root: PathBuf) -> Result<(), String> {
+        if new_root == self.data_dir {
+            return Ok(());
+        }
+        self.quit_all_keep_targets();
+        fs::create_dir_all(&new_root).map_err(|error| error.to_string())?;
+        fs::create_dir_all(new_root.join("plugins")).map_err(|error| error.to_string())?;
+        fs::create_dir_all(new_root.join("icons")).map_err(|error| error.to_string())?;
+
+        let old_plugins_json = self.data_dir.join("plugins.json");
+        let new_plugins_json = new_root.join("plugins.json");
+        if old_plugins_json.exists() && !new_plugins_json.exists() {
+            fs::copy(&old_plugins_json, &new_plugins_json).map_err(|error| error.to_string())?;
+        }
+
+        let old_plugins_dir = self.data_dir.join("plugins");
+        let new_plugins_dir = new_root.join("plugins");
+        if old_plugins_dir.exists() {
+            copy_dir_recursive(&old_plugins_dir, &new_plugins_dir)?;
+        }
+        let old_icons = self.data_dir.join("icons");
+        let new_icons = new_root.join("icons");
+        if old_icons.exists() {
+            copy_dir_recursive(&old_icons, &new_icons)?;
+        }
+
+        self.data_dir = new_root;
+        catalog::sync_bundled_icons(&self.data_dir)?;
+        if new_plugins_json.exists() {
+            let raw = fs::read_to_string(&new_plugins_json).map_err(|error| error.to_string())?;
+            self.state = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+        }
+        self.save()?;
+        self.start_enabled();
+        Ok(())
+    }
+
     fn record_mut(&mut self, id: &str) -> Result<&mut PluginRecord, String> {
+        if !self.state.plugins.iter().any(|plugin| plugin.id == id) {
+            self.state.plugins.push(PluginRecord {
+                id: id.to_string(),
+                enabled: false,
+                installed_version: None,
+            });
+        }
         self.state
             .plugins
             .iter_mut()
@@ -137,14 +210,15 @@ impl PluginManager {
     }
 
     fn exe_path(&self, spec: &PluginDef, version: &str) -> PathBuf {
-        self.install_dir(spec.id, version).join(spec.exe_name)
+        self.install_dir(&spec.id, version).join(&spec.exe_name)
     }
 
     pub fn refresh_latest(&mut self) -> Result<(), String> {
-        for plugin in catalog::PLUGINS {
-            match fetch_latest_plugin_asset(plugin) {
+        let catalog = self.catalog.clone();
+        for plugin in catalog {
+            match fetch_latest_plugin_asset(&plugin) {
                 Ok((version, asset)) => {
-                    self.latest.insert(plugin.id.to_string(), (version, asset));
+                    self.latest.insert(plugin.id.clone(), (version, asset));
                 }
                 Err(error) => {
                     eprintln!("刷新 {} 最新版本失败：{error}", plugin.id);
@@ -155,7 +229,6 @@ impl PluginManager {
     }
 
     pub fn install(&mut self, id: &str) -> Result<(), String> {
-        let spec = catalog::find(id).ok_or_else(|| format!("未知插件：{id}"))?;
         if !self.latest.contains_key(id) {
             self.refresh_latest()?;
         }
@@ -166,9 +239,12 @@ impl PluginManager {
             .ok_or_else(|| format!("找不到 {id} 的最新 Release（需要带 *-plugin.zip 的发布）。"))?;
         let version_dir = version.trim_start_matches('v').to_string();
         let tag = format!("v{version_dir}");
+        let (owner, repo, exe_name) = {
+            let spec = self.spec(id)?;
+            (spec.owner.clone(), spec.repo.clone(), spec.exe_name.clone())
+        };
         let download_url = format!(
-            "https://github.com/{}/{}/releases/download/{}/{}",
-            spec.owner, spec.repo, tag, asset_name
+            "https://github.com/{owner}/{repo}/releases/download/{tag}/{asset_name}"
         );
         let zip_path = self.data_dir.join(format!("{id}-{version_dir}-plugin.zip"));
         download_file(&download_url, &zip_path)?;
@@ -179,9 +255,9 @@ impl PluginManager {
         fs::create_dir_all(&target).map_err(|error| error.to_string())?;
         extract_zip(&zip_path, &target)?;
         let _ = fs::remove_file(&zip_path);
-        let exe = self.exe_path(spec, &version_dir);
+        let exe = target.join(&exe_name);
         if !exe.exists() {
-            return Err(format!("插件包缺少可执行文件：{}", spec.exe_name));
+            return Err(format!("插件包缺少可执行文件：{exe_name}"));
         }
         let _ = self.stop(id);
         {
@@ -235,7 +311,6 @@ impl PluginManager {
             }
             self.children.remove(id);
         }
-        let spec = catalog::find(id).ok_or_else(|| format!("未知插件：{id}"))?;
         let version = self
             .state
             .plugins
@@ -243,7 +318,10 @@ impl PluginManager {
             .find(|plugin| plugin.id == id)
             .and_then(|plugin| plugin.installed_version.clone())
             .ok_or_else(|| "插件尚未安装。".to_string())?;
-        let exe = self.exe_path(spec, &version);
+        let exe = {
+            let spec = self.spec(id)?;
+            self.exe_path(spec, &version)
+        };
         if !exe.exists() {
             return Err(format!("找不到插件可执行文件：{}", exe.display()));
         }
@@ -259,7 +337,6 @@ impl PluginManager {
     }
 
     pub fn stop(&mut self, id: &str) -> Result<(), String> {
-        // 直接结束 worker 进程即可保留目标应用；避免在异步运行时里 block_on。
         if let Some(mut child) = self.children.remove(id) {
             let _ = child.kill();
             let _ = child.wait();
@@ -305,18 +382,19 @@ impl PluginManager {
     }
 
     pub async fn plugin_command(&mut self, id: &str, cmd: &str) -> Result<Value, String> {
-        let spec = catalog::find(id).ok_or_else(|| format!("未知插件：{id}"))?;
+        let pipe = self.spec(id)?.pipe_name.clone();
         if !self.is_running(id) {
             self.start(id)?;
             tokio::time::sleep(std::time::Duration::from_millis(900)).await;
         }
-        ipc::request(spec.pipe_name, cmd).await
+        ipc::request(&pipe, cmd).await
     }
 
     pub async fn snapshot(&mut self) -> HostSnapshot {
         let mut cards = Vec::new();
         let warning = detect_standalone_warning();
-        for plugin in catalog::PLUGINS {
+        let catalog = self.catalog.clone();
+        for plugin in catalog {
             let record = self
                 .state
                 .plugins
@@ -324,29 +402,29 @@ impl PluginManager {
                 .find(|item| item.id == plugin.id)
                 .cloned()
                 .unwrap_or(PluginRecord {
-                    id: plugin.id.to_string(),
+                    id: plugin.id.clone(),
                     enabled: false,
                     installed_version: None,
                 });
             let (latest_version, latest_asset_name) = self
                 .latest
-                .get(plugin.id)
+                .get(&plugin.id)
                 .cloned()
                 .map(|(version, asset)| (Some(version), Some(asset)))
                 .unwrap_or((None, None));
-            let running = self.is_running(plugin.id);
+            let running = self.is_running(&plugin.id);
             let mut status_message = if record.installed_version.is_none() {
                 "未安装".to_string()
             } else if !record.enabled {
-                "已安装（未启用）".to_string()
+                "未启用".to_string()
             } else if running {
                 "运行中".to_string()
             } else {
-                "已启用但未运行".to_string()
+                "已启用".to_string()
             };
             let mut phase = "idle".to_string();
             if running {
-                if let Ok(status) = ipc::request(plugin.pipe_name, "status").await {
+                if let Ok(status) = ipc::request(&plugin.pipe_name, "status").await {
                     phase = status
                         .get("phase")
                         .and_then(|value| value.as_str())
@@ -363,15 +441,16 @@ impl PluginManager {
                 }
                 _ => false,
             };
-            let target_hint = match plugin.id {
-                "codex" => "OpenAI Codex 桌面应用",
-                "notion" => "Notion 桌面应用",
-                _ => "目标桌面应用",
-            };
+            let icon_path = catalog::resolve_icon_path(&self.data_dir, &plugin)
+                .map(|path| path.to_string_lossy().into_owned());
             cards.push(PluginCard {
-                id: plugin.id.to_string(),
-                display_name: plugin.display_name.to_string(),
-                target_hint: target_hint.to_string(),
+                id: plugin.id.clone(),
+                display_name: plugin.display_name.clone(),
+                target_hint: if plugin.target_hint.is_empty() {
+                    "目标桌面应用".to_string()
+                } else {
+                    plugin.target_hint.clone()
+                },
                 enabled: record.enabled,
                 installed_version: record.installed_version,
                 latest_version,
@@ -381,6 +460,8 @@ impl PluginManager {
                 phase,
                 plugin_protocol: PLUGIN_PROTOCOL,
                 update_available,
+                icon_path,
+                icon_web: format!("/plugins/{}.png", plugin.id),
             });
         }
         HostSnapshot {
@@ -455,10 +536,25 @@ fn fetch_latest_plugin_asset(spec: &PluginDef) -> Result<(String, String), Strin
     let asset = assets
         .iter()
         .filter_map(|asset| asset.get("name").and_then(|name| name.as_str()))
-        .find(|name| name.starts_with(spec.asset_prefix) && name.ends_with("-plugin.zip"))
+        .find(|name| name.starts_with(&spec.asset_prefix) && name.ends_with("-plugin.zip"))
         .ok_or_else(|| format!("Release 中没有 {}*-plugin.zip", spec.asset_prefix))?
         .to_string();
     Ok((tag.trim_start_matches('v').to_string(), asset))
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|error| error.to_string())?;
+    for entry in fs::read_dir(src).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if !to.exists() {
+            fs::copy(&from, &to).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 fn detect_standalone_warning() -> Option<String> {
@@ -467,11 +563,14 @@ fn detect_standalone_warning() -> Option<String> {
         .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Run")
         .ok()?;
     let mut hits = Vec::new();
-    if run.get_value::<String, _>("Codex Background Studio").is_ok() {
-        hits.push("Codex Background Studio");
-    }
-    if run.get_value::<String, _>("Notion Background Studio").is_ok() {
-        hits.push("Notion Background Studio");
+    for name in [
+        "Codex Background Studio",
+        "Notion Background Studio",
+        "Multica Background Studio",
+    ] {
+        if run.get_value::<String, _>(name).is_ok() {
+            hits.push(name);
+        }
     }
     if hits.is_empty() {
         None

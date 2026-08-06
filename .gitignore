@@ -6,6 +6,8 @@ src-tauri/target
 .env
 .idea
 .vscode
+app-icon-source.png
+*.code-workspace
 
 *.code-workspace
 

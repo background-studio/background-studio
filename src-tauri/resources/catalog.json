@@ -1,0 +1,38 @@
+{
+  "pluginProtocol": 1,
+  "plugins": [
+    {
+      "id": "codex",
+      "displayName": "Codex Background Studio",
+      "owner": "background-studio",
+      "repo": "codex_desktop_background",
+      "assetPrefix": "CodexBackgroundStudio-",
+      "exeName": "Codex Background Studio.exe",
+      "pipeName": "\\\\.\\pipe\\background-studio-codex",
+      "targetHint": "OpenAI Codex 桌面应用",
+      "icon": "codex.png"
+    },
+    {
+      "id": "notion",
+      "displayName": "Notion Background Studio",
+      "owner": "background-studio",
+      "repo": "notion_desktop_background",
+      "assetPrefix": "NotionBackgroundStudio-",
+      "exeName": "Notion Background Studio.exe",
+      "pipeName": "\\\\.\\pipe\\background-studio-notion",
+      "targetHint": "Notion 桌面应用",
+      "icon": "notion.png"
+    },
+    {
+      "id": "multica",
+      "displayName": "Multica Background Studio",
+      "owner": "background-studio",
+      "repo": "multica_desktop_background",
+      "assetPrefix": "MulticaBackgroundStudio-",
+      "exeName": "Multica Background Studio.exe",
+      "pipeName": "\\\\.\\pipe\\background-studio-multica",
+      "targetHint": "Multica 桌面应用",
+      "icon": "multica.png"
+    }
+  ]
+}

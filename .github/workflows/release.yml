@@ -68,7 +68,11 @@ jobs:
           releaseBody: |
             Background Studio 壳（pluginProtocol: 1）。
 
-            安装后请在界面中从各自 Release 安装 Codex / Notion 插件（`*-plugin.zip`）。
-            迁移说明见仓库 `docs/migration.md`。
+            - 白底扁平 UI；左侧为组织品牌图标
+            - 插件列表由 catalog 动态加载（内置 Codex / Notion / Multica，可本地扩展）
+            - 支持更改插件数据目录
+
+            安装后请在界面中从各自 Release 安装插件（`*-plugin.zip`）。
+            动态加插件与迁移说明见 `docs/plugin-protocol.md`、`docs/migration.md`。
           releaseDraft: false
           prerelease: false

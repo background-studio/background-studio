@@ -1,18 +1,17 @@
 mod catalog;
+mod config;
 mod host;
 mod ipc;
 mod plugins;
 
-use std::{
-    path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Mutex, MutexGuard,
-    },
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex, MutexGuard,
 };
 
 use plugins::{HostSnapshot, PluginManager};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use tokio::sync::Mutex as AsyncMutex;
 
 const SNAPSHOT_EVENT: &str = "host:snapshot-changed";
@@ -27,13 +26,6 @@ fn lock_tray(
     value: &Mutex<Option<host::TrayUi>>,
 ) -> Result<MutexGuard<'_, Option<host::TrayUi>>, String> {
     value.lock().map_err(|_| "托盘状态锁已损坏。".to_string())
-}
-
-fn data_directory() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("BackgroundStudio")
 }
 
 async fn build_snapshot(state: &HostState) -> HostSnapshot {
@@ -71,7 +63,18 @@ async fn refresh_releases(app: AppHandle) -> Result<HostSnapshot, String> {
     {
         let state = app.state::<HostState>();
         let mut plugins = state.plugins.lock().await;
+        plugins.reload_catalog()?;
         plugins.refresh_latest()?;
+    }
+    emit_snapshot(&app).await
+}
+
+#[tauri::command]
+async fn reload_catalog(app: AppHandle) -> Result<HostSnapshot, String> {
+    {
+        let state = app.state::<HostState>();
+        let mut plugins = state.plugins.lock().await;
+        plugins.reload_catalog()?;
     }
     emit_snapshot(&app).await
 }
@@ -146,6 +149,25 @@ async fn open_data_directory(state: State<'_, HostState>) -> Result<(), String> 
 }
 
 #[tauri::command]
+async fn choose_data_directory(app: AppHandle) -> Result<HostSnapshot, String> {
+    let folder = app
+        .dialog()
+        .file()
+        .set_title("选择插件安装数据目录")
+        .blocking_pick_folder()
+        .and_then(|path| path.into_path().ok())
+        .ok_or_else(|| "已取消选择目录。".to_string())?;
+
+    let new_root = config::set_data_root(&folder)?;
+    {
+        let state = app.state::<HostState>();
+        let mut plugins = state.plugins.lock().await;
+        plugins.relocate_data_directory(new_root)?;
+    }
+    emit_snapshot(&app).await
+}
+
+#[tauri::command]
 fn show_window(app: AppHandle) -> Result<(), String> {
     host::show_main_window(&app);
     Ok(())
@@ -160,7 +182,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let manager = PluginManager::load(data_directory())
+            let data_dir = config::resolve_data_directory().map_err(std::io::Error::other)?;
+            let manager = PluginManager::load(data_dir)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             let auto_start = manager.state().auto_start_with_windows;
             let start_minimized = manager.state().start_minimized;
@@ -206,12 +229,14 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
             refresh_releases,
+            reload_catalog,
             install_plugin,
             uninstall_plugin,
             set_plugin_enabled,
             plugin_command,
             update_host_settings,
             open_data_directory,
+            choose_data_directory,
             show_window
         ])
         .run(tauri::generate_context!())

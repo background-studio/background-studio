@@ -1,8 +1,8 @@
 {
   "name": "background-studio",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
-  "description": "Background Studio host: one tray to manage Codex and Notion background plugins.",
+  "description": "Background Studio host: one tray to manage Codex, Notion, and Multica background plugins.",
   "author": "Background Studio contributors",
   "license": "MIT",
   "type": "module",

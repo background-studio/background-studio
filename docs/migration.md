@@ -3,14 +3,14 @@
 ## 推荐用法
 
 1. 安装 [Background Studio](https://github.com/background-studio/background-studio/releases) 壳
-2. 在壳里分别安装 Codex / Notion 插件（从各自仓库 Release 下载 `*-plugin.zip`）
+2. 在壳里分别安装 Codex / Notion / Multica 插件（从各自仓库 Release 下载 `*-plugin.zip`）
 3. Windows 托盘只保留 **Background Studio** 一个图标
 
 ## 独立版怎么办
 
-- 已安装的 Codex / Notion NSIS **仍可单独使用**
+- 已安装的 Codex / Notion / Multica NSIS **仍可单独使用**
 - 不建议与壳插件版同时运行：会出现双托盘、重复注入
-- 若注册表自启动里仍有 `Codex Background Studio` / `Notion Background Studio`：
+- 若注册表自启动里仍有 `Codex Background Studio` / `Notion Background Studio` / `Multica Background Studio`：
   1. 打开对应独立版，关掉「开机启动」
   2. 或在壳界面按提示处理
   3. 再只开 Background Studio
@@ -23,6 +23,7 @@
 
 - `%LOCALAPPDATA%\CodexBackgroundStudio`
 - `%LOCALAPPDATA%\NotionBackgroundStudio`
+- `%LOCALAPPDATA%\MulticaBackgroundStudio`
 
 壳自己的状态在：
 
@@ -37,3 +38,4 @@
 | 壳 | [background-studio](https://github.com/background-studio/background-studio) |
 | Codex 插件 | [codex_desktop_background](https://github.com/background-studio/codex_desktop_background) |
 | Notion 插件 | [notion_desktop_background](https://github.com/background-studio/notion_desktop_background) |
+| Multica 插件 | [multica_desktop_background](https://github.com/background-studio/multica_desktop_background) |
