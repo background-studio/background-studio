@@ -1,6 +1,6 @@
 [package]
 name = "background-studio"
-version = "0.1.5"
+version = "0.1.6"
 description = "Background Studio host for Codex and Notion background plugins."
 authors = ["Background Studio contributors"]
 license = "MIT"

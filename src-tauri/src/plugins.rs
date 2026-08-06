@@ -3,7 +3,14 @@ use std::{
     fs::{self, File},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    time::Duration,
 };
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -341,13 +348,13 @@ impl PluginManager {
             return Err(format!("插件包缺少可执行文件：{exe_name}"));
         }
         Self::emit_install_progress(app, id, "start", None, "启动中…");
-        let _ = self.stop(id);
         {
             let record = self.record_mut(id)?;
             record.installed_version = Some(version_dir);
             record.enabled = true;
         }
         self.save()?;
+        // start 内部会先停掉该插件目录下所有旧进程（含孤儿），再拉起当前版本。
         self.start(id)?;
         Self::emit_install_progress(app, id, "done", Some(100.0), "安装完成");
         Ok(())
@@ -388,12 +395,8 @@ impl PluginManager {
     }
 
     pub fn start(&mut self, id: &str) -> Result<(), String> {
-        if let Some(child) = self.children.get_mut(id) {
-            if child.try_wait().ok().flatten().is_none() {
-                return Ok(());
-            }
-            self.children.remove(id);
-        }
+        // 先停干净（含孤儿旧版），再起当前 installedVersion，避免单实例把新版挡掉。
+        self.stop(id)?;
         let version = self
             .state
             .plugins
@@ -424,6 +427,11 @@ impl PluginManager {
             let _ = child.kill();
             let _ = child.wait();
         }
+        let exe_name = self.spec(id)?.exe_name.clone();
+        let plugin_root = self.data_dir.join("plugins").join(id);
+        kill_processes_under_plugin_root(&plugin_root, &exe_name);
+        // 给单实例 / 命名管道一点释放时间，否则紧接着 start 新版仍可能被旧实例挡掉。
+        std::thread::sleep(Duration::from_millis(400));
         Ok(())
     }
 
@@ -650,6 +658,38 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// 结束 `plugins/{id}/` 下任意版本的同名 exe（含壳重启后丢失句柄的孤儿进程）。
+/// 不碰独立 NSIS 安装路径，避免误杀非插件实例。
+fn kill_processes_under_plugin_root(plugin_root: &Path, exe_name: &str) {
+    let root = plugin_root
+        .canonicalize()
+        .unwrap_or_else(|_| plugin_root.to_path_buf());
+    let root_norm = root
+        .to_string_lossy()
+        .replace('/', "\\")
+        .trim_start_matches(r"\\?\")
+        .to_ascii_lowercase();
+    let exe_name = exe_name.replace('\'', "''");
+    let root_ps = root_norm.replace('\'', "''");
+    let script = format!(
+        "$root = '{root_ps}'; \
+         Get-CimInstance Win32_Process -Filter \"Name='{exe_name}'\" | ForEach-Object {{ \
+           if ($_.ExecutablePath) {{ \
+             $p = $_.ExecutablePath.Replace('/','\\').ToLower(); \
+             if ($p.StartsWith('\\\\?\\')) {{ $p = $p.Substring(4) }}; \
+             if ($p.StartsWith($root)) {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }} \
+           }} \
+         }}"
+    );
+    let mut command = Command::new("powershell");
+    command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    #[cfg(windows)]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let _ = command.status();
 }
 
 fn detect_standalone_warning() -> Option<String> {
