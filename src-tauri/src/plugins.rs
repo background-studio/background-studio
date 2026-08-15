@@ -19,6 +19,7 @@ use tauri::{AppHandle, Emitter};
 use crate::{
     catalog::{self, PluginDef, PLUGIN_PROTOCOL},
     config, host_update, ipc,
+    proxy::{ProxyMode, ProxySettings},
 };
 
 pub const INSTALL_PROGRESS_EVENT: &str = "host:install-progress";
@@ -46,6 +47,8 @@ pub struct PluginsState {
     pub plugins: Vec<PluginRecord>,
     pub auto_start_with_windows: bool,
     pub start_minimized: bool,
+    #[serde(default)]
+    pub proxy: ProxySettings,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -80,6 +83,8 @@ pub struct HostSnapshot {
     pub host_latest_version: Option<String>,
     pub host_update_available: bool,
     pub host_release_url: Option<String>,
+    pub proxy_mode: ProxyMode,
+    pub proxy_url: String,
 }
 
 pub struct PluginManager {
@@ -118,6 +123,7 @@ impl PluginManager {
                     .collect(),
                 auto_start_with_windows: false,
                 start_minimized: true,
+                proxy: ProxySettings::default(),
             }
         };
         for plugin in &catalog {
@@ -179,6 +185,17 @@ impl PluginManager {
     pub fn set_autostart(&mut self, enabled: bool, start_minimized: bool) -> Result<(), String> {
         self.state.auto_start_with_windows = enabled;
         self.state.start_minimized = start_minimized;
+        self.save()
+    }
+
+    pub fn proxy_settings(&self) -> ProxySettings {
+        self.state.proxy.clone()
+    }
+
+    pub fn set_proxy(&mut self, proxy: ProxySettings) -> Result<(), String> {
+        let proxy = proxy.normalized();
+        // 允许先切到自定义再填地址；真正发请求时再校验。
+        self.state.proxy = proxy;
         self.save()
     }
 
@@ -244,8 +261,9 @@ impl PluginManager {
 
     pub fn refresh_latest(&mut self) -> Result<(), String> {
         let catalog = self.catalog.clone();
+        let proxy = self.state.proxy.clone();
         for plugin in catalog {
-            match fetch_latest_plugin_asset(&plugin) {
+            match fetch_latest_plugin_asset(&plugin, &proxy) {
                 Ok((version, asset)) => {
                     self.latest.insert(plugin.id.clone(), (version, asset));
                     self.latest_errors.remove(&plugin.id);
@@ -256,7 +274,7 @@ impl PluginManager {
                 }
             }
         }
-        match host_update::fetch_latest_host_release() {
+        match host_update::fetch_latest_host_release(&proxy) {
             Ok(info) => {
                 self.host_release = info;
                 self.host_release_error = None;
@@ -316,25 +334,31 @@ impl PluginManager {
             "https://github.com/{owner}/{repo}/releases/download/{tag}/{asset_name}"
         );
         let zip_path = self.data_dir.join(format!("{id}-{version_dir}-plugin.zip"));
+        let proxy = self.state.proxy.clone();
         Self::emit_install_progress(app, id, "download", Some(0.0), "开始下载…");
         let mut last_reported = 0u8;
-        host_update::download_with_progress(&download_url, &zip_path, |downloaded, total| {
-            let percent = match total {
-                Some(total) if total > 0 => (downloaded as f64 / total as f64) * 100.0,
-                _ => 0.0,
-            };
-            let bucket = percent.floor() as u8 / 2;
-            if bucket != last_reported || downloaded == total.unwrap_or(downloaded) {
-                last_reported = bucket;
-                Self::emit_install_progress(
-                    app,
-                    id,
-                    "download",
-                    Some(percent),
-                    &format!("下载中 {percent:.0}%"),
-                );
-            }
-        })?;
+        host_update::download_with_progress(
+            &download_url,
+            &zip_path,
+            &proxy,
+            |downloaded, total| {
+                let percent = match total {
+                    Some(total) if total > 0 => (downloaded as f64 / total as f64) * 100.0,
+                    _ => 0.0,
+                };
+                let bucket = percent.floor() as u8 / 2;
+                if bucket != last_reported || downloaded == total.unwrap_or(downloaded) {
+                    last_reported = bucket;
+                    Self::emit_install_progress(
+                        app,
+                        id,
+                        "download",
+                        Some(percent),
+                        &format!("下载中 {percent:.0}%"),
+                    );
+                }
+            },
+        )?;
         Self::emit_install_progress(app, id, "extract", None, "解压中…");
         let target = self.install_dir(id, &version_dir);
         if target.exists() {
@@ -590,6 +614,8 @@ impl PluginManager {
             host_latest_version,
             host_update_available,
             host_release_url: self.host_release.release_url.clone(),
+            proxy_mode: self.state.proxy.mode.clone(),
+            proxy_url: self.state.proxy.url.clone(),
         }
     }
 }
@@ -617,11 +643,14 @@ fn extract_zip(zip_path: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn fetch_latest_plugin_asset(spec: &PluginDef) -> Result<(String, String), String> {
-    let value = host_update::github_api_get(&format!(
-        "repos/{}/{}/releases/latest",
-        spec.owner, spec.repo
-    ))?;
+fn fetch_latest_plugin_asset(
+    spec: &PluginDef,
+    proxy: &ProxySettings,
+) -> Result<(String, String), String> {
+    let value = host_update::github_api_get(
+        &format!("repos/{}/{}/releases/latest", spec.owner, spec.repo),
+        proxy,
+    )?;
     let tag = value
         .get("tag_name")
         .and_then(|tag| tag.as_str())

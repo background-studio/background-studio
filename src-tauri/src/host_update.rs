@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 
+use crate::proxy::{self, ProxySettings};
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -126,10 +128,11 @@ fn reject_rate_limit_payload(value: &Value, body: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn github_api_get_via_gh(api_path: &str) -> Result<Value, String> {
+fn github_api_get_via_gh(api_path: &str, settings: &ProxySettings) -> Result<Value, String> {
     let mut command = Command::new("gh");
     command.args(["api", api_path]);
     configure_no_window(&mut command);
+    proxy::apply_to_command(&mut command, settings);
     let output = command
         .output()
         .map_err(|error| format!("调用 gh api 失败：{error}"))?;
@@ -158,9 +161,10 @@ fn github_api_get_via_gh(api_path: &str) -> Result<Value, String> {
     Ok(value)
 }
 
-fn github_api_get_via_http(api_path: &str) -> Result<Value, String> {
+fn github_api_get_via_http(api_path: &str, settings: &ProxySettings) -> Result<Value, String> {
     let url = format!("https://api.github.com/{api_path}");
-    let response = reqwest::blocking::Client::new()
+    let client = proxy::build_blocking_client(settings)?;
+    let response = client
         .get(url)
         .header("User-Agent", "BackgroundStudioHost/0.1")
         .header("Accept", "application/vnd.github+json")
@@ -178,18 +182,19 @@ fn github_api_get_via_http(api_path: &str) -> Result<Value, String> {
 
 /// 查 GitHub API JSON。本机已登录 `gh` 时优先走 `gh api`（已登录额度）；
 /// 否则匿名 HTTPS。已登录但 `gh api` 失败时不回退匿名。
-pub fn github_api_get(api_path: &str) -> Result<Value, String> {
+pub fn github_api_get(api_path: &str, settings: &ProxySettings) -> Result<Value, String> {
     if gh_authenticated() {
-        github_api_get_via_gh(api_path)
+        github_api_get_via_gh(api_path, settings)
     } else {
-        github_api_get_via_http(api_path)
+        github_api_get_via_http(api_path, settings)
     }
 }
 
-pub fn fetch_latest_host_release() -> Result<HostReleaseInfo, String> {
-    let value = github_api_get(&format!(
-        "repos/{HOST_OWNER}/{HOST_REPO}/releases/latest"
-    ))?;
+pub fn fetch_latest_host_release(settings: &ProxySettings) -> Result<HostReleaseInfo, String> {
+    let value = github_api_get(
+        &format!("repos/{HOST_OWNER}/{HOST_REPO}/releases/latest"),
+        settings,
+    )?;
     let tag = value
         .get("tag_name")
         .and_then(|tag| tag.as_str())
@@ -269,12 +274,14 @@ pub fn emit_progress(app: &AppHandle, phase: &str, percent: Option<f64>, message
 pub fn download_with_progress<F>(
     url: &str,
     path: &Path,
+    settings: &ProxySettings,
     mut on_progress: F,
 ) -> Result<(), String>
 where
     F: FnMut(u64, Option<u64>),
 {
-    let mut response = reqwest::blocking::Client::new()
+    let client = proxy::build_blocking_client(settings)?;
+    let mut response = client
         .get(url)
         .header("User-Agent", "BackgroundStudioHost/0.1")
         .send()

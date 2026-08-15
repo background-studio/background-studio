@@ -1,6 +1,6 @@
 [package]
 name = "background-studio"
-version = "0.1.7"
+version = "0.1.8"
 description = "Background Studio host for Codex and Notion background plugins."
 authors = ["Background Studio contributors"]
 license = "MIT"
@@ -22,7 +22,7 @@ tauri-plugin-dialog = "2.7.2"
 tauri-plugin-opener = "2.5.4"
 tauri-plugin-single-instance = "2.4.3"
 tokio = { version = "1.53.1", features = ["fs", "io-util", "net", "time", "sync"] }
-reqwest = { version = "0.13.3", default-features = false, features = ["blocking", "json", "native-tls-no-alpn"] }
+reqwest = { version = "0.13.3", default-features = false, features = ["blocking", "json", "native-tls-no-alpn", "socks", "system-proxy"] }
 zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 winreg = "0.56.0"
 uuid = { version = "1.20.0", features = ["v4"] }

@@ -4,6 +4,7 @@ mod host;
 mod host_update;
 mod ipc;
 mod plugins;
+mod proxy;
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -144,6 +145,26 @@ async fn update_host_settings(
 }
 
 #[tauri::command]
+async fn update_proxy_settings(
+    app: AppHandle,
+    mode: String,
+    url: String,
+) -> Result<HostSnapshot, String> {
+    let mode = match mode.trim().to_ascii_lowercase().as_str() {
+        "off" => proxy::ProxyMode::Off,
+        "system" => proxy::ProxyMode::System,
+        "custom" => proxy::ProxyMode::Custom,
+        other => return Err(format!("未知代理模式：{other}")),
+    };
+    {
+        let state = app.state::<HostState>();
+        let mut plugins = state.plugins.lock().await;
+        plugins.set_proxy(proxy::ProxySettings { mode, url })?;
+    }
+    emit_snapshot(&app).await
+}
+
+#[tauri::command]
 async fn open_data_directory(state: State<'_, HostState>) -> Result<(), String> {
     let plugins = state.plugins.lock().await;
     host::open_data_directory(plugins.data_dir())
@@ -194,25 +215,36 @@ async fn update_host(app: AppHandle) -> Result<(), String> {
         return Err("当前已是最新版本。".to_string());
     }
 
+    let proxy_settings = {
+        let state = app.state::<HostState>();
+        let plugins = state.plugins.lock().await;
+        plugins.proxy_settings()
+    };
+
     let installer = host_update::installer_temp_path(&asset_name);
     host_update::emit_progress(&app, "download", Some(0.0), "开始下载壳安装包…");
     let mut last_reported = 0u8;
-    host_update::download_with_progress(&download_url, &installer, |downloaded, total| {
-        let percent = match total {
-            Some(total) if total > 0 => (downloaded as f64 / total as f64) * 100.0,
-            _ => 0.0,
-        };
-        let bucket = percent.floor() as u8 / 2;
-        if bucket != last_reported || downloaded == total.unwrap_or(downloaded) {
-            last_reported = bucket;
-            host_update::emit_progress(
-                &app,
-                "download",
-                Some(percent),
-                &format!("下载壳更新 {percent:.0}%"),
-            );
-        }
-    })?;
+    host_update::download_with_progress(
+        &download_url,
+        &installer,
+        &proxy_settings,
+        |downloaded, total| {
+            let percent = match total {
+                Some(total) if total > 0 => (downloaded as f64 / total as f64) * 100.0,
+                _ => 0.0,
+            };
+            let bucket = percent.floor() as u8 / 2;
+            if bucket != last_reported || downloaded == total.unwrap_or(downloaded) {
+                last_reported = bucket;
+                host_update::emit_progress(
+                    &app,
+                    "download",
+                    Some(percent),
+                    &format!("下载壳更新 {percent:.0}%"),
+                );
+            }
+        },
+    )?;
     host_update::emit_progress(&app, "launch", None, "正在启动安装程序…");
     host_update::launch_installer(&installer)?;
     host::quit_keep_targets(app);
@@ -287,6 +319,7 @@ pub fn run() {
             set_plugin_enabled,
             plugin_command,
             update_host_settings,
+            update_proxy_settings,
             open_data_directory,
             choose_data_directory,
             update_host,

@@ -18,6 +18,8 @@ export type PluginCard = {
   iconWeb: string;
 };
 
+export type ProxyMode = "off" | "system" | "custom";
+
 export type HostSnapshot = {
   plugins: PluginCard[];
   autoStartWithWindows: boolean;
@@ -28,6 +30,8 @@ export type HostSnapshot = {
   hostLatestVersion: string | null;
   hostUpdateAvailable: boolean;
   hostReleaseUrl: string | null;
+  proxyMode: ProxyMode;
+  proxyUrl: string;
 };
 
 export type InstallProgress = {
@@ -97,6 +101,13 @@ export async function updateHostSettings(
     autoStartWithWindows,
     startMinimized,
   });
+}
+
+export async function updateProxySettings(
+  mode: ProxyMode,
+  url: string,
+): Promise<HostSnapshot> {
+  return invoke("update_proxy_settings", { mode, url });
 }
 
 export async function openDataDirectory(): Promise<void> {

@@ -15,11 +15,16 @@ import {
   uninstallPlugin,
   updateHost,
   updateHostSettings,
+  updateProxySettings,
   type HostSnapshot,
   type HostUpdateProgress,
   type InstallProgress,
   type PluginCard,
+  type ProxyMode,
 } from "./bridge";
+
+const PROXY_SCOPE_HINT =
+  "仅影响壳自身的网络：检查更新、下载插件包、下载壳更新，以及壳调用 gh api 时的环境。不影响各插件内部（例如媒体下载），也不影响目标桌面应用。";
 
 export function App() {
   const [snapshot, setSnapshot] = useState<HostSnapshot | null>(null);
@@ -27,16 +32,22 @@ export function App() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [installProgress, setInstallProgress] = useState<InstallProgress | null>(null);
   const [hostProgress, setHostProgress] = useState<HostUpdateProgress | null>(null);
+  const [draftProxyUrl, setDraftProxyUrl] = useState("");
   const [, startTransition] = useTransition();
 
   useEffect(() => {
     const unlisteners: Array<() => void> = [];
     (async () => {
       try {
-        setSnapshot(await getSnapshot());
+        const initial = await getSnapshot();
+        setSnapshot(initial);
+        setDraftProxyUrl(initial.proxyUrl);
         unlisteners.push(
           await onSnapshot((next) => {
-            startTransition(() => setSnapshot(next));
+            startTransition(() => {
+              setSnapshot(next);
+              setDraftProxyUrl(next.proxyUrl);
+            });
           }),
         );
         unlisteners.push(
@@ -64,13 +75,19 @@ export function App() {
     setBusyId(label);
     setError(null);
     try {
-      setSnapshot(await action());
+      const next = await action();
+      setSnapshot(next);
+      setDraftProxyUrl(next.proxyUrl);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusyId(null);
       setInstallProgress(null);
     }
+  }
+
+  async function applyProxy(mode: ProxyMode, url = draftProxyUrl) {
+    await run("proxy", () => updateProxySettings(mode, url));
   }
 
   async function runHostUpdate() {
@@ -252,6 +269,61 @@ export function App() {
               />
               启动时进托盘
             </label>
+          </div>
+          <div className="proxy-settings">
+            <div className="proxy-label-row">
+              <span className="title">网络代理</span>
+              <span
+                className="proxy-hint"
+                title={PROXY_SCOPE_HINT}
+                aria-label={PROXY_SCOPE_HINT}
+              >
+                !
+              </span>
+            </div>
+            <div className="proxy-modes" role="radiogroup" aria-label="网络代理">
+              {(
+                [
+                  ["off", "不使用代理"],
+                  ["system", "使用系统代理"],
+                  ["custom", "使用自定义代理"],
+                ] as const
+              ).map(([mode, label]) => (
+                <label key={mode} className="proxy-mode">
+                  <input
+                    type="radio"
+                    name="proxy-mode"
+                    value={mode}
+                    checked={snapshot.proxyMode === mode}
+                    disabled={busyId !== null}
+                    onChange={() => void applyProxy(mode)}
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+            {snapshot.proxyMode === "custom" ? (
+              <div className="proxy-custom">
+                <input
+                  className="proxy-input"
+                  type="text"
+                  value={draftProxyUrl}
+                  disabled={busyId !== null}
+                  placeholder="例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080"
+                  onChange={(event) => setDraftProxyUrl(event.target.value)}
+                  onBlur={() => {
+                    if (draftProxyUrl.trim() !== snapshot.proxyUrl) {
+                      void applyProxy("custom", draftProxyUrl);
+                    }
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.currentTarget.blur();
+                    }
+                  }}
+                />
+              </div>
+            ) : null}
           </div>
         </section>
 
