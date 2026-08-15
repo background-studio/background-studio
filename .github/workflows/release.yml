@@ -72,7 +72,6 @@ jobs:
             - 插件列表由 catalog 动态加载（内置 Codex / Notion / Multica，可本地扩展）
             - 支持更改插件数据目录
             - 插件安装进度；壳自身可检查更新
-            - 网络代理：不使用 / 系统代理 / 自定义代理（仅影响壳的检查更新与下载）
             - Scoop：`scoop bucket add background-studio https://github.com/background-studio/scoop-bucket`
 
             安装后请在界面中从各自 Release 安装插件（`*-plugin.zip`）。
