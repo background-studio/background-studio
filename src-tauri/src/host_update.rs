@@ -49,29 +49,13 @@ pub fn current_version() -> String {
 pub fn version_newer(latest: &str, current: &str) -> bool {
     let latest = latest.trim_start_matches('v');
     let current = current.trim_start_matches('v');
-    latest != current && compare_semver(latest, current) == std::cmp::Ordering::Greater
-}
-
-fn compare_semver(a: &str, b: &str) -> std::cmp::Ordering {
-    let parse = |value: &str| -> Vec<u64> {
-        value
-            .split(|c: char| !c.is_ascii_digit())
-            .filter(|part| !part.is_empty())
-            .filter_map(|part| part.parse().ok())
-            .collect()
-    };
-    let left = parse(a);
-    let right = parse(b);
-    let len = left.len().max(right.len());
-    for index in 0..len {
-        let l = left.get(index).copied().unwrap_or(0);
-        let r = right.get(index).copied().unwrap_or(0);
-        match l.cmp(&r) {
-            std::cmp::Ordering::Equal => {}
-            other => return other,
-        }
+    match (
+        semver::Version::parse(latest),
+        semver::Version::parse(current),
+    ) {
+        (Ok(latest), Ok(current)) => latest > current,
+        _ => false,
     }
-    std::cmp::Ordering::Equal
 }
 
 const RATE_LIMIT_HINT: &str = "GitHub API 限流（未登录约 60 次/小时/IP）。若本机已安装 GitHub CLI，可先执行 gh auth login 后再点「检查更新」";
@@ -240,14 +224,21 @@ pub fn fetch_latest_host_release(settings: &ProxySettings) -> Result<HostRelease
 
 #[cfg(test)]
 mod tests {
-    use super::format_github_api_error;
+    use super::{format_github_api_error, version_newer};
+
+    #[test]
+    fn compares_semver_prereleases_correctly() {
+        assert!(version_newer("0.5.4-beta.1", "0.5.3"));
+        assert!(version_newer("0.5.4", "0.5.4-beta.1"));
+        assert!(version_newer("0.5.4-beta.2", "0.5.4-beta.1"));
+        assert!(!version_newer("0.5.4-beta.1", "0.5.4"));
+        assert!(!version_newer("not-a-version", "0.5.4"));
+    }
 
     #[test]
     fn maps_rate_limit_to_chinese_hint() {
-        let message = format_github_api_error(
-            403,
-            r#"{"message":"API rate limit exceeded for 1.2.3.4."}"#,
-        );
+        let message =
+            format_github_api_error(403, r#"{"message":"API rate limit exceeded for 1.2.3.4."}"#);
         assert!(message.contains("限流"));
         assert!(message.contains("检查更新"));
         assert!(message.contains("gh auth login"));
@@ -293,7 +284,9 @@ where
     let mut buffer = [0u8; 64 * 1024];
     let mut downloaded = 0u64;
     loop {
-        let n = response.read(&mut buffer).map_err(|error| error.to_string())?;
+        let n = response
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
         if n == 0 {
             break;
         }

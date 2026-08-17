@@ -38,7 +38,11 @@ async fn build_snapshot(state: &HostState) -> HostSnapshot {
 pub async fn emit_snapshot(app: &AppHandle) -> Result<HostSnapshot, String> {
     let state = app.state::<HostState>();
     let snapshot = build_snapshot(&state).await;
-    let running = snapshot.plugins.iter().filter(|plugin| plugin.running).count();
+    let running = snapshot
+        .plugins
+        .iter()
+        .filter(|plugin| plugin.running)
+        .count();
     let installed = snapshot
         .plugins
         .iter()
@@ -53,6 +57,20 @@ pub async fn emit_snapshot(app: &AppHandle) -> Result<HostSnapshot, String> {
     app.emit(SNAPSHOT_EVENT, &snapshot)
         .map_err(|error| error.to_string())?;
     Ok(snapshot)
+}
+
+fn start_snapshot_publisher(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let _ = emit_snapshot(&app).await;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let state = app.state::<HostState>();
+            if state.quitting.load(Ordering::SeqCst) {
+                break;
+            }
+            let _ = emit_snapshot(&app).await;
+        }
+    });
 }
 
 #[tauri::command]
@@ -87,6 +105,7 @@ async fn install_plugin(app: AppHandle, id: String) -> Result<HostSnapshot, Stri
         let state = app.state::<HostState>();
         let mut plugins = state.plugins.lock().await;
         plugins.install(&id, &app)?;
+        plugins.wait_until_ready(&id).await?;
     }
     emit_snapshot(&app).await
 }
@@ -111,16 +130,15 @@ async fn set_plugin_enabled(
         let state = app.state::<HostState>();
         let mut plugins = state.plugins.lock().await;
         plugins.set_enabled(&id, enabled)?;
+        if enabled {
+            plugins.wait_until_ready(&id).await?;
+        }
     }
     emit_snapshot(&app).await
 }
 
 #[tauri::command]
-async fn plugin_command(
-    app: AppHandle,
-    id: String,
-    cmd: String,
-) -> Result<HostSnapshot, String> {
+async fn plugin_command(app: AppHandle, id: String, cmd: String) -> Result<HostSnapshot, String> {
     {
         let state = app.state::<HostState>();
         let mut plugins = state.plugins.lock().await;
@@ -208,9 +226,7 @@ async fn update_host(app: AppHandle) -> Result<(), String> {
     let asset_name = release
         .asset_name
         .ok_or_else(|| "找不到壳安装包文件名。".to_string())?;
-    let latest = release
-        .latest_version
-        .unwrap_or_else(|| "最新".to_string());
+    let latest = release.latest_version.unwrap_or_else(|| "最新".to_string());
     if !host_update::version_newer(&latest, &host_update::current_version()) {
         return Err("当前已是最新版本。".to_string());
     }
@@ -288,15 +304,12 @@ pub fn run() {
                 let managed = app.state::<HostState>();
                 *lock_tray(&managed.tray).map_err(std::io::Error::other)? = Some(tray);
             }
-            let start_hidden = start_minimized
-                || std::env::args().any(|argument| argument == "--hidden");
+            let start_hidden =
+                start_minimized || std::env::args().any(|argument| argument == "--hidden");
             if !start_hidden {
                 host::show_main_window(app.handle());
             }
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = emit_snapshot(&handle).await;
-            });
+            start_snapshot_publisher(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {

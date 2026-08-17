@@ -30,8 +30,9 @@ scoop update background-studio
 
 - 单托盘宿主机
 - 从 GitHub Release 安装 / 更新 / 卸载插件（带下载进度）
-- 启用后以 `--plugin` 启动 worker（无独立托盘）
-- Named Pipe 汇总状态，并转发打开设置 / 应用 / 暂停 / 恢复
+- 启用后以 `--plugin` 启动 worker（无独立托盘），自动等待并接管之后启动的目标程序
+- 启用前已经运行的目标不会被静默关闭，可从壳里手动“重启并接管”
+- Named Pipe 实时汇总等待 / 接管 / 活动状态，并转发打开设置 / 重新应用 / 暂停 / 恢复
 - 「检查更新」同时检查插件与壳自身；可下载并启动壳安装包
 - 本机已安装并登录 [GitHub CLI](https://cli.github.com/)（`gh auth login`）时，查版优先走 `gh api`，不易撞匿名 API 限流；未登录则仍用匿名 HTTP
 - 仅注册壳自己的开机启动

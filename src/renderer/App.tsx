@@ -347,6 +347,19 @@ function PluginCardView(props: {
   const [brokenIcon, setBrokenIcon] = useState(false);
   const icon = pluginIconSrc(plugin);
   const installing = Boolean(progress);
+  const waitingForManualTakeover =
+    plugin.phase === "blocked" ||
+    plugin.phase === "existing-unmanaged" ||
+    plugin.statusMessage.includes("手动接管") ||
+    plugin.statusMessage.includes("已在运行");
+  const takeoverLabel =
+    plugin.phase === "active"
+      ? "重新应用"
+      : waitingForManualTakeover
+        ? "重启并接管"
+        : "立即接管";
+  const commandBusy =
+    busy || plugin.phase === "starting" || plugin.phase === "takeover";
 
   return (
     <article className="card">
@@ -414,20 +427,24 @@ function PluginCardView(props: {
             >
               {plugin.enabled ? "停用" : "启用"}
             </button>
-            <button
-              className="btn"
-              disabled={busy}
-              onClick={() => props.onCommand("open-ui")}
-            >
-              打开设置
-            </button>
-            <button
-              className="btn"
-              disabled={busy}
-              onClick={() => props.onCommand("apply")}
-            >
-              应用
-            </button>
+            {plugin.enabled ? (
+              <>
+                <button
+                  className="btn"
+                  disabled={commandBusy}
+                  onClick={() => props.onCommand("open-ui")}
+                >
+                  打开设置
+                </button>
+                <button
+                  className="btn"
+                  disabled={commandBusy}
+                  onClick={() => props.onCommand("apply")}
+                >
+                  {takeoverLabel}
+                </button>
+              </>
+            ) : null}
             <button className="btn" disabled={busy} onClick={props.onInstall}>
               {installing
                 ? "更新中…"

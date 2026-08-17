@@ -52,8 +52,8 @@ pub fn load_catalog(bootstrap_dir: &Path) -> Result<Vec<PluginDef>, String> {
     let overlay = bootstrap_dir.join("catalog.json");
     if overlay.exists() {
         let raw = fs::read_to_string(&overlay).map_err(|error| error.to_string())?;
-        let local: CatalogFile =
-            serde_json::from_str(&raw).map_err(|error| format!("本地 catalog.json 无效：{error}"))?;
+        let local: CatalogFile = serde_json::from_str(&raw)
+            .map_err(|error| format!("本地 catalog.json 无效：{error}"))?;
         for plugin in local.plugins {
             by_id.insert(plugin.id.clone(), plugin);
         }
@@ -97,8 +97,14 @@ pub fn sync_bundled_icons(data_dir: &Path) -> Result<(), String> {
     fs::create_dir_all(&icons).map_err(|error| error.to_string())?;
     // 内置三件套每次启动覆盖写入，避免旧错误图标（如 Notion 误用组织标）残留。
     for (name, bytes) in [
-        ("codex.png", include_bytes!("../resources/codex.png").as_slice()),
-        ("notion.png", include_bytes!("../resources/notion.png").as_slice()),
+        (
+            "codex.png",
+            include_bytes!("../resources/codex.png").as_slice(),
+        ),
+        (
+            "notion.png",
+            include_bytes!("../resources/notion.png").as_slice(),
+        ),
         (
             "multica.png",
             include_bytes!("../resources/multica.png").as_slice(),

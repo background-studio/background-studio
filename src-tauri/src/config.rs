@@ -42,7 +42,12 @@ pub fn save_host_config(config: &HostConfig) -> Result<(), String> {
 
 pub fn resolve_data_directory() -> Result<PathBuf, String> {
     let config = load_host_config()?;
-    if let Some(root) = config.data_root.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(root) = config
+        .data_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let path = PathBuf::from(root);
         fs::create_dir_all(&path).map_err(|error| error.to_string())?;
         return Ok(path);

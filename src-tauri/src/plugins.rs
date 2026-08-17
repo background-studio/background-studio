@@ -3,7 +3,7 @@ use std::{
     fs::{self, File},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(windows)]
@@ -330,9 +330,8 @@ impl PluginManager {
             let spec = self.spec(id)?;
             (spec.owner.clone(), spec.repo.clone(), spec.exe_name.clone())
         };
-        let download_url = format!(
-            "https://github.com/{owner}/{repo}/releases/download/{tag}/{asset_name}"
-        );
+        let download_url =
+            format!("https://github.com/{owner}/{repo}/releases/download/{tag}/{asset_name}");
         let zip_path = self.data_dir.join(format!("{id}-{version_dir}-plugin.zip"));
         let proxy = self.state.proxy.clone();
         Self::emit_install_progress(app, id, "download", Some(0.0), "开始下载…");
@@ -496,12 +495,40 @@ impl PluginManager {
         }
     }
 
+    pub async fn wait_until_ready(&mut self, id: &str) -> Result<Value, String> {
+        let pipe = self.spec(id)?.pipe_name.clone();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut last_error = "插件尚未创建控制管道。".to_string();
+        loop {
+            if !self.is_running(id) {
+                return Err(format!("插件启动后意外退出：{last_error}"));
+            }
+            match ipc::request(&pipe, "status").await {
+                Ok(status) => return Ok(status),
+                Err(error) => last_error = error,
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("插件在 8 秒内未就绪：{last_error}"));
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
     pub async fn plugin_command(&mut self, id: &str, cmd: &str) -> Result<Value, String> {
+        let enabled = self
+            .state
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == id)
+            .is_some_and(|plugin| plugin.enabled && plugin.installed_version.is_some());
+        if !enabled {
+            return Err("请先启用插件。".to_string());
+        }
         let pipe = self.spec(id)?.pipe_name.clone();
         if !self.is_running(id) {
             self.start(id)?;
-            tokio::time::sleep(std::time::Duration::from_millis(900)).await;
         }
+        self.wait_until_ready(id).await?;
         ipc::request(&pipe, cmd).await
     }
 
@@ -549,14 +576,22 @@ impl PluginManager {
             };
             let mut phase = "idle".to_string();
             if running {
-                if let Ok(status) = ipc::request(&plugin.pipe_name, "status").await {
-                    phase = status
-                        .get("phase")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    if let Some(message) = status.get("message").and_then(|value| value.as_str()) {
-                        status_message = message.to_string();
+                match ipc::request(&plugin.pipe_name, "status").await {
+                    Ok(status) => {
+                        phase = status
+                            .get("phase")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        if let Some(message) =
+                            status.get("message").and_then(|value| value.as_str())
+                        {
+                            status_message = message.to_string();
+                        }
+                    }
+                    Err(error) => {
+                        phase = "error".to_string();
+                        status_message = format!("插件状态不可用：{error}");
                     }
                 }
             }
@@ -647,16 +682,40 @@ fn fetch_latest_plugin_asset(
     spec: &PluginDef,
     proxy: &ProxySettings,
 ) -> Result<(String, String), String> {
-    let value = host_update::github_api_get(
-        &format!("repos/{}/{}/releases/latest", spec.owner, spec.repo),
-        proxy,
-    )?;
-    let tag = value
+    let prerelease_channel = env!("CARGO_PKG_VERSION").contains('-');
+    let endpoint = if prerelease_channel {
+        format!("repos/{}/{}/releases?per_page=20", spec.owner, spec.repo)
+    } else {
+        format!("repos/{}/{}/releases/latest", spec.owner, spec.repo)
+    };
+    let value = host_update::github_api_get(&endpoint, proxy)?;
+    select_plugin_asset(spec, &value, prerelease_channel)
+}
+
+fn select_plugin_asset(
+    spec: &PluginDef,
+    value: &Value,
+    prerelease_channel: bool,
+) -> Result<(String, String), String> {
+    let release = if prerelease_channel {
+        value
+            .as_array()
+            .and_then(|releases| {
+                releases.iter().find(|release| {
+                    release.get("draft").and_then(Value::as_bool) != Some(true)
+                        && release.get("prerelease").and_then(Value::as_bool) == Some(true)
+                })
+            })
+            .ok_or_else(|| "没有找到可用的插件预发布版本。".to_string())?
+    } else {
+        value
+    };
+    let tag = release
         .get("tag_name")
         .and_then(|tag| tag.as_str())
         .ok_or_else(|| "Release 缺少 tag_name（仓库可能还没有正式发布）。".to_string())?
         .to_string();
-    let assets = value
+    let assets = release
         .get("assets")
         .and_then(|assets| assets.as_array())
         .ok_or_else(|| "Release 缺少 assets".to_string())?;
@@ -743,5 +802,69 @@ fn detect_standalone_warning() -> Option<String> {
             "检测到独立版自启动：{}。建议改用壳插件模式，避免双托盘。",
             hits.join("、")
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_plugin_asset;
+    use crate::catalog::PluginDef;
+    use serde_json::json;
+
+    fn plugin() -> PluginDef {
+        PluginDef {
+            id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            owner: "background-studio".to_string(),
+            repo: "codex_desktop_background".to_string(),
+            asset_prefix: "CodexBackgroundStudio-".to_string(),
+            exe_name: "Codex Background Studio.exe".to_string(),
+            pipe_name: r"\\.\pipe\background-studio-codex-v1".to_string(),
+            target_hint: String::new(),
+            icon: None,
+        }
+    }
+
+    #[test]
+    fn stable_channel_reads_latest_release_object() {
+        let value = json!({
+            "tag_name": "v0.5.4",
+            "assets": [{ "name": "CodexBackgroundStudio-0.5.4-plugin.zip" }]
+        });
+        assert_eq!(
+            select_plugin_asset(&plugin(), &value, false).unwrap(),
+            (
+                "0.5.4".to_string(),
+                "CodexBackgroundStudio-0.5.4-plugin.zip".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn prerelease_channel_ignores_stable_and_draft_releases() {
+        let value = json!([
+            {
+                "tag_name": "v0.5.4",
+                "draft": false,
+                "prerelease": false,
+                "assets": [{ "name": "CodexBackgroundStudio-0.5.4-plugin.zip" }]
+            },
+            {
+                "tag_name": "v0.5.5-beta.2",
+                "draft": true,
+                "prerelease": true,
+                "assets": [{ "name": "CodexBackgroundStudio-0.5.5-beta.2-plugin.zip" }]
+            },
+            {
+                "tag_name": "v0.5.5-beta.1",
+                "draft": false,
+                "prerelease": true,
+                "assets": [{ "name": "CodexBackgroundStudio-0.5.5-beta.1-plugin.zip" }]
+            }
+        ]);
+        assert_eq!(
+            select_plugin_asset(&plugin(), &value, true).unwrap().0,
+            "0.5.5-beta.1"
+        );
     }
 }

@@ -77,9 +77,10 @@ jobs:
             安装后请在界面中从各自 Release 安装插件（`*-plugin.zip`）。
             动态加插件与迁移说明见 `docs/plugin-protocol.md`、`docs/migration.md`。
           releaseDraft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
       - name: Notify scoop-bucket to sync manifest
+        if: ${{ !contains(github.ref_name, '-') }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN || github.token }}
