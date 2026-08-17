@@ -27,15 +27,19 @@ use crate::{
     thumbnails::{self, ThumbnailPixels, TEXTURE_CACHE_BYTES},
 };
 
-const CANVAS: Color32 = Color32::from_rgb(243, 247, 250);
-const PAPER: Color32 = Color32::WHITE;
-const INK: Color32 = Color32::from_rgb(24, 31, 38);
-const MUTED: Color32 = Color32::from_rgb(94, 108, 120);
-const LINE: Color32 = Color32::from_rgb(221, 229, 235);
-const BLUE: Color32 = Color32::from_rgb(41, 121, 255);
-const GREEN: Color32 = Color32::from_rgb(24, 157, 112);
-const AMBER: Color32 = Color32::from_rgb(214, 137, 38);
-const RED: Color32 = Color32::from_rgb(201, 64, 72);
+const CANVAS: Color32 = Color32::from_rgb(14, 20, 27);
+const RAIL: Color32 = Color32::from_rgb(9, 14, 20);
+const PAPER: Color32 = Color32::from_rgb(23, 31, 41);
+const PAPER_RAISED: Color32 = Color32::from_rgb(29, 39, 51);
+const INK: Color32 = Color32::from_rgb(235, 242, 247);
+const MUTED: Color32 = Color32::from_rgb(143, 158, 171);
+const LINE: Color32 = Color32::from_rgb(45, 58, 72);
+const CYAN: Color32 = Color32::from_rgb(79, 209, 197);
+const CYAN_DIM: Color32 = Color32::from_rgb(42, 106, 101);
+const BRASS: Color32 = Color32::from_rgb(201, 168, 106);
+const GREEN: Color32 = Color32::from_rgb(67, 190, 134);
+const AMBER: Color32 = Color32::from_rgb(224, 164, 72);
+const RED: Color32 = Color32::from_rgb(224, 92, 101);
 
 #[derive(Clone)]
 enum Command {
@@ -357,7 +361,7 @@ impl StudioApp {
             ui.add(
                 egui::Image::new(&cached.texture)
                     .fit_to_exact_size(size)
-                    .corner_radius(7.0),
+                    .corner_radius(9.0),
             );
             return;
         }
@@ -380,48 +384,55 @@ impl StudioApp {
 
     fn render_sidebar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::left("navigation")
-            .exact_size(270.0)
-            .frame(Frame::new().fill(Color32::from_rgb(17, 24, 31)))
+            .exact_size(272.0)
+            .frame(
+                Frame::new()
+                    .fill(RAIL)
+                    .stroke(Stroke::new(1.0, LINE))
+                    .inner_margin(egui::Margin::symmetric(18, 22)),
+            )
             .show(ui, |ui| {
-                ui.add_space(22.0);
                 ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(38.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 11.0, BLUE);
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(42.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, 12.0, PAPER_RAISED);
+                    ui.painter().rect_stroke(
+                        rect,
+                        12.0,
+                        Stroke::new(1.0, BRASS),
+                        egui::StrokeKind::Inside,
+                    );
                     ui.painter().text(
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
                         "BS",
                         egui::FontId::proportional(15.0),
-                        Color32::WHITE,
+                        BRASS,
                     );
+                    ui.add_space(10.0);
                     ui.vertical(|ui| {
                         ui.label(
                             RichText::new("Background Studio")
-                                .size(18.0)
+                                .size(17.0)
                                 .strong()
-                                .color(Color32::WHITE),
+                                .color(INK),
                         );
-                        ui.label(
-                            RichText::new("统一背景控制台")
-                                .size(12.0)
-                                .color(Color32::GRAY),
-                        );
+                        ui.label(RichText::new("统一背景控制台").size(11.0).color(MUTED));
                     });
                 });
-                ui.add_space(26.0);
+                ui.add_space(28.0);
                 let overview_selected = self.selected_plugin.is_none();
-                if navigation_button(ui, "总览", overview_selected).clicked() {
+                if navigation_button(ui, "控制台", overview_selected).clicked() {
                     self.selected_plugin = None;
                     self.detail = None;
                 }
-                ui.add_space(18.0);
+                ui.add_space(22.0);
                 ui.label(
                     RichText::new("插件")
                         .size(11.0)
                         .strong()
-                        .color(Color32::from_rgb(128, 145, 158)),
+                        .color(Color32::from_rgb(112, 128, 142)),
                 );
-                ui.add_space(6.0);
+                ui.add_space(8.0);
                 let plugins = self
                     .snapshot
                     .as_ref()
@@ -448,7 +459,7 @@ impl StudioApp {
                     ui.label(
                         RichText::new(format!("Native host · {version}"))
                             .size(11.0)
-                            .color(Color32::from_rgb(112, 130, 144)),
+                            .color(Color32::from_rgb(102, 118, 132)),
                     );
                 });
             });
@@ -457,10 +468,12 @@ impl StudioApp {
     fn render_overview(&mut self, ui: &mut egui::Ui) {
         page_heading(ui, "控制台", "插件、媒体与接管状态都在这里。");
         if let Some(snapshot) = self.snapshot.clone() {
-            if let Some(warning) = snapshot.warning {
-                notice_frame(ui, &warning, AMBER);
+            if let Some(warning) = snapshot.warning.as_deref() {
+                notice_frame(ui, warning, AMBER);
                 ui.add_space(12.0);
             }
+            self.render_takeover_bus(ui, &snapshot);
+            ui.add_space(16.0);
             ui.horizontal_wrapped(|ui| {
                 metric(
                     ui,
@@ -493,31 +506,122 @@ impl StudioApp {
             ui.add_space(18.0);
             for plugin in snapshot.plugins {
                 self.render_plugin_card(ui, plugin);
-                ui.add_space(10.0);
+                ui.add_space(12.0);
             }
-            ui.add_space(14.0);
+            ui.add_space(16.0);
             self.render_host_settings(ui);
         } else {
             ui.spinner();
-            ui.label("正在加载宿主状态…");
+            ui.label(RichText::new("正在加载宿主状态…").color(MUTED));
         }
+    }
+
+    fn render_takeover_bus(&mut self, ui: &mut egui::Ui, snapshot: &HostSnapshot) {
+        Frame::new()
+            .fill(PAPER)
+            .stroke(Stroke::new(1.0, LINE))
+            .corner_radius(16.0)
+            .inner_margin(egui::Margin::symmetric(20, 16))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("接管总线").size(12.0).strong().color(BRASS));
+                        ui.label(
+                            RichText::new("壳 → worker → 目标程序")
+                                .size(11.0)
+                                .color(MUTED),
+                        );
+                    });
+                    ui.add_space(18.0);
+                    let available = ui.available_width();
+                    let count = snapshot.plugins.len().max(1) as f32;
+                    let node_width = ((available - 24.0 * (count - 1.0)) / count).max(120.0);
+                    for (index, plugin) in snapshot.plugins.iter().enumerate() {
+                        let color = phase_color(&plugin.phase, plugin.running);
+                        let (rect, response) = ui
+                            .allocate_exact_size(Vec2::new(node_width, 58.0), egui::Sense::click());
+                        let fill = if self.selected_plugin.as_deref() == Some(plugin.id.as_str()) {
+                            PAPER_RAISED
+                        } else {
+                            Color32::from_rgb(19, 27, 36)
+                        };
+                        ui.painter().rect_filled(rect, 12.0, fill);
+                        ui.painter().rect_stroke(
+                            rect,
+                            12.0,
+                            Stroke::new(1.0, color.gamma_multiply(0.55)),
+                            egui::StrokeKind::Inside,
+                        );
+                        let center = rect.left_center() + egui::vec2(18.0, 0.0);
+                        ui.painter().circle_filled(center, 6.0, color);
+                        ui.painter().circle_stroke(
+                            center,
+                            10.0,
+                            Stroke::new(1.0, color.gamma_multiply(0.35)),
+                        );
+                        ui.painter().text(
+                            rect.left_center() + egui::vec2(36.0, -10.0),
+                            egui::Align2::LEFT_CENTER,
+                            &plugin.display_name,
+                            egui::FontId::proportional(13.0),
+                            INK,
+                        );
+                        ui.painter().text(
+                            rect.left_center() + egui::vec2(36.0, 10.0),
+                            egui::Align2::LEFT_CENTER,
+                            if plugin.running {
+                                "worker 在线"
+                            } else if plugin.installed_version.is_some() {
+                                "已安装"
+                            } else {
+                                "待安装"
+                            },
+                            egui::FontId::proportional(10.0),
+                            MUTED,
+                        );
+                        if response.clicked() {
+                            self.open_plugin(plugin.id.clone());
+                        }
+                        if index + 1 < snapshot.plugins.len() {
+                            let start = rect.right_center() + egui::vec2(4.0, 0.0);
+                            let end = start + egui::vec2(16.0, 0.0);
+                            ui.painter().line_segment(
+                                [start, end],
+                                Stroke::new(1.5, CYAN.gamma_multiply(0.7)),
+                            );
+                        }
+                    }
+                });
+            });
     }
 
     fn render_plugin_card(&mut self, ui: &mut egui::Ui, plugin: crate::plugins::PluginCard) {
         Frame::new()
             .fill(PAPER)
             .stroke(Stroke::new(1.0, LINE))
-            .corner_radius(14.0)
-            .inner_margin(18.0)
+            .corner_radius(16.0)
+            .inner_margin(egui::Margin::symmetric(20, 16))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let color = phase_color(&plugin.phase, plugin.running);
-                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(42.0), egui::Sense::hover());
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(46.0), egui::Sense::hover());
                     ui.painter()
-                        .rect_filled(rect, 12.0, color.gamma_multiply(0.14));
-                    ui.painter().circle_filled(rect.center(), 6.0, color);
+                        .rect_filled(rect, 14.0, color.gamma_multiply(0.12));
+                    ui.painter().rect_stroke(
+                        rect,
+                        14.0,
+                        Stroke::new(1.0, color.gamma_multiply(0.35)),
+                        egui::StrokeKind::Inside,
+                    );
+                    ui.painter().circle_filled(rect.center(), 7.0, color);
+                    ui.add_space(14.0);
                     ui.vertical(|ui| {
-                        ui.label(RichText::new(&plugin.display_name).size(17.0).strong());
+                        ui.label(
+                            RichText::new(&plugin.display_name)
+                                .size(17.0)
+                                .strong()
+                                .color(INK),
+                        );
                         ui.label(RichText::new(&plugin.target_hint).size(12.0).color(MUTED));
                         ui.label(
                             RichText::new(&plugin.status_message)
@@ -531,7 +635,11 @@ impl StudioApp {
                         }
                         if plugin.installed_version.is_none() {
                             if ui
-                                .add_enabled(self.busy_count == 0, egui::Button::new("安装"))
+                                .add_enabled(
+                                    self.busy_count == 0,
+                                    egui::Button::new(RichText::new("安装").color(INK))
+                                        .fill(CYAN_DIM),
+                                )
                                 .clicked()
                             {
                                 self.dispatch(Command::Install(plugin.id.clone()));
@@ -549,7 +657,11 @@ impl StudioApp {
                             }
                             if plugin.update_available
                                 && ui
-                                    .add_enabled(self.busy_count == 0, egui::Button::new("更新"))
+                                    .add_enabled(
+                                        self.busy_count == 0,
+                                        egui::Button::new(RichText::new("更新").color(INK))
+                                            .fill(CYAN_DIM),
+                                    )
                                     .clicked()
                             {
                                 self.dispatch(Command::Install(plugin.id.clone()));
@@ -567,11 +679,18 @@ impl StudioApp {
         Frame::new()
             .fill(PAPER)
             .stroke(Stroke::new(1.0, LINE))
-            .corner_radius(14.0)
-            .inner_margin(18.0)
+            .corner_radius(16.0)
+            .inner_margin(egui::Margin::symmetric(20, 16))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("宿主设置").size(16.0).strong());
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("宿主设置").size(16.0).strong().color(INK));
+                        ui.label(
+                            RichText::new("启动、数据目录、代理与壳更新")
+                                .size(11.0)
+                                .color(MUTED),
+                        );
+                    });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if snapshot.host_update_available {
                             let version =
@@ -579,7 +698,10 @@ impl StudioApp {
                             if ui
                                 .add_enabled(
                                     self.busy_count == 0,
-                                    egui::Button::new(format!("更新到 {version}")),
+                                    egui::Button::new(
+                                        RichText::new(format!("更新到 {version}")).color(INK),
+                                    )
+                                    .fill(CYAN_DIM),
                                 )
                                 .clicked()
                             {
@@ -594,7 +716,7 @@ impl StudioApp {
                         }
                     });
                 });
-                ui.add_space(8.0);
+                ui.add_space(10.0);
                 let mut auto_start = snapshot.auto_start_with_windows;
                 let mut minimized = snapshot.start_minimized;
                 let auto_changed = ui.checkbox(&mut auto_start, "随 Windows 启动").changed();
@@ -605,7 +727,14 @@ impl StudioApp {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("数据目录").color(MUTED));
-                    ui.monospace(&snapshot.data_directory);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&snapshot.data_directory)
+                                .monospace()
+                                .color(INK),
+                        )
+                        .truncate(),
+                    );
                     if ui.button("打开").clicked() {
                         match desktop::open_data_directory(std::path::Path::new(
                             &snapshot.data_directory,
@@ -629,7 +758,7 @@ impl StudioApp {
                 let mut mode = original_mode.clone();
                 let mut url = original_url.clone();
                 ui.horizontal(|ui| {
-                    ui.label("代理");
+                    ui.label(RichText::new("代理").color(MUTED));
                     ui.selectable_value(&mut mode, ProxyMode::Off, "关闭");
                     ui.selectable_value(&mut mode, ProxyMode::System, "系统");
                     ui.selectable_value(&mut mode, ProxyMode::Custom, "自定义");
@@ -640,13 +769,6 @@ impl StudioApp {
                 if (mode != original_mode || url != original_url) && ui.button("保存代理").clicked()
                 {
                     self.dispatch(Command::UpdateProxy(ProxySettings { mode, url }));
-                }
-                ui.add_space(6.0);
-                if ui
-                    .add_enabled(self.busy_count == 0, egui::Button::new("检查更新"))
-                    .clicked()
-                {
-                    self.dispatch(Command::Refresh);
                 }
             });
     }
@@ -668,56 +790,65 @@ impl StudioApp {
                 detail.plugin.target_hint, detail.plugin_protocol, detail.plugin.status_message
             ),
         );
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(
-                    detail.plugin.enabled && self.busy_count == 0,
-                    egui::Button::new("应用背景"),
-                )
-                .clicked()
-            {
-                self.dispatch(Command::PluginAction(
-                    plugin_id.to_string(),
-                    "apply".to_string(),
-                ));
-            }
-            if ui
-                .add_enabled(
-                    detail.plugin.running && self.busy_count == 0,
-                    egui::Button::new("暂停"),
-                )
-                .clicked()
-            {
-                self.dispatch(Command::PluginAction(
-                    plugin_id.to_string(),
-                    "pause".to_string(),
-                ));
-            }
-            if ui
-                .add_enabled(
-                    detail.plugin.running && self.busy_count == 0,
-                    egui::Button::new("恢复官方外观"),
-                )
-                .clicked()
-            {
-                self.dispatch(Command::PluginAction(
-                    plugin_id.to_string(),
-                    "restore".to_string(),
-                ));
-            }
-            ui.label(
-                RichText::new(format!(
-                    "{} 个媒体 · {} 个轮播项",
-                    detail.library.len(),
-                    detail.profile.playlist_ids.len()
-                ))
-                .color(MUTED),
-            );
-        });
-        ui.add_space(14.0);
+        Frame::new()
+            .fill(PAPER)
+            .stroke(Stroke::new(1.0, LINE))
+            .corner_radius(16.0)
+            .inner_margin(egui::Margin::symmetric(18, 14))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_enabled(
+                            detail.plugin.enabled && self.busy_count == 0,
+                            egui::Button::new(RichText::new("应用背景").color(INK)).fill(CYAN_DIM),
+                        )
+                        .clicked()
+                    {
+                        self.dispatch(Command::PluginAction(
+                            plugin_id.to_string(),
+                            "apply".to_string(),
+                        ));
+                    }
+                    if ui
+                        .add_enabled(
+                            detail.plugin.running && self.busy_count == 0,
+                            egui::Button::new("暂停"),
+                        )
+                        .clicked()
+                    {
+                        self.dispatch(Command::PluginAction(
+                            plugin_id.to_string(),
+                            "pause".to_string(),
+                        ));
+                    }
+                    if ui
+                        .add_enabled(
+                            detail.plugin.running && self.busy_count == 0,
+                            egui::Button::new("恢复官方外观"),
+                        )
+                        .clicked()
+                    {
+                        self.dispatch(Command::PluginAction(
+                            plugin_id.to_string(),
+                            "restore".to_string(),
+                        ));
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} 个媒体 · {} 个轮播项",
+                                detail.library.len(),
+                                detail.profile.playlist_ids.len()
+                            ))
+                            .color(MUTED),
+                        );
+                    });
+                });
+            });
+        ui.add_space(16.0);
 
         ui.columns(2, |columns| {
-            columns[0].set_min_width(430.0);
+            columns[0].set_min_width(460.0);
             self.render_media_library(&mut columns[0], plugin_id, &detail);
             self.render_display_settings(&mut columns[1], plugin_id, &detail);
         });
@@ -727,20 +858,27 @@ impl StudioApp {
         Frame::new()
             .fill(PAPER)
             .stroke(Stroke::new(1.0, LINE))
-            .corner_radius(14.0)
-            .inner_margin(16.0)
+            .corner_radius(16.0)
+            .inner_margin(egui::Margin::symmetric(18, 16))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("共享媒体库").size(16.0).strong());
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("共享媒体库").size(16.0).strong().color(INK));
+                        ui.label(
+                            RichText::new("静态缩略图只在壳里预览，动态播放仍交给目标程序")
+                                .size(11.0)
+                                .color(MUTED),
+                        );
+                    });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.search)
                                 .hint_text("搜索")
-                                .desired_width(130.0),
+                                .desired_width(150.0),
                         );
                     });
                 });
-                ui.add_space(8.0);
+                ui.add_space(10.0);
                 let dropped: Vec<PathBuf> = ui.ctx().input(|input| {
                     input
                         .raw
@@ -753,7 +891,10 @@ impl StudioApp {
                     self.dispatch(Command::ImportFiles(plugin_id.to_string(), dropped));
                 }
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("选择文件").clicked() {
+                    if ui
+                        .add(egui::Button::new(RichText::new("选择文件").color(INK)).fill(CYAN_DIM))
+                        .clicked()
+                    {
                         if let Some(paths) = rfd::FileDialog::new()
                             .add_filter(
                                 "媒体",
@@ -806,12 +947,13 @@ impl StudioApp {
                                 detail.profile.playlist_ids.iter().any(|id| id == &item.id);
                             Frame::new()
                                 .fill(if active {
-                                    BLUE.gamma_multiply(0.07)
+                                    CYAN_DIM.gamma_multiply(0.28)
                                 } else {
-                                    Color32::TRANSPARENT
+                                    Color32::from_rgb(19, 27, 36)
                                 })
-                                .corner_radius(9.0)
-                                .inner_margin(9.0)
+                                .stroke(Stroke::new(1.0, if active { CYAN } else { LINE }))
+                                .corner_radius(12.0)
+                                .inner_margin(10.0)
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         let kind = match item.kind {
@@ -820,7 +962,7 @@ impl StudioApp {
                                         };
                                         self.render_thumbnail(ui, thumbnail_source.as_ref(), kind);
                                         ui.vertical(|ui| {
-                                            ui.label(RichText::new(&item.name).strong());
+                                            ui.label(RichText::new(&item.name).strong().color(INK));
                                             ui.label(
                                                 RichText::new(format_bytes(item.byte_size))
                                                     .size(11.0)
@@ -867,14 +1009,15 @@ impl StudioApp {
                                                         },
                                                     ));
                                                 }
-                                                if ui
-                                                    .small_button(if active {
-                                                        "已选"
-                                                    } else {
-                                                        "设为背景"
-                                                    })
-                                                    .clicked()
-                                                    && !active
+                                                let active_button = if active {
+                                                    egui::Button::new(
+                                                        RichText::new("已选").color(INK),
+                                                    )
+                                                    .fill(CYAN_DIM)
+                                                } else {
+                                                    egui::Button::new("设为背景")
+                                                };
+                                                if ui.add_enabled(!active, active_button).clicked()
                                                 {
                                                     self.dispatch(Command::SetActiveMedia(
                                                         plugin_id.to_string(),
@@ -900,11 +1043,18 @@ impl StudioApp {
         Frame::new()
             .fill(PAPER)
             .stroke(Stroke::new(1.0, LINE))
-            .corner_radius(14.0)
-            .inner_margin(16.0)
+            .corner_radius(16.0)
+            .inner_margin(egui::Margin::symmetric(18, 16))
             .show(ui, |ui| {
-                ui.label(RichText::new("显示设置").size(16.0).strong());
-                ui.add_space(8.0);
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("显示设置").size(16.0).strong().color(INK));
+                    ui.label(
+                        RichText::new("由插件 Manifest 生成，保存后通过协议 2 热更新")
+                            .size(11.0)
+                            .color(MUTED),
+                    );
+                });
+                ui.add_space(10.0);
                 egui::ScrollArea::vertical()
                     .id_salt("settings")
                     .max_height(470.0)
@@ -922,7 +1072,7 @@ impl StudioApp {
                 if ui
                     .add_enabled(
                         self.display_draft != detail.profile.display && self.busy_count == 0,
-                        egui::Button::new("保存并热更新"),
+                        egui::Button::new(RichText::new("保存并热更新").color(INK)).fill(CYAN_DIM),
                     )
                     .clicked()
                 {
@@ -935,7 +1085,7 @@ impl StudioApp {
                     ));
                 }
                 ui.separator();
-                ui.label(RichText::new("轮播").strong());
+                ui.label(RichText::new("轮播").strong().color(INK));
                 let mut slideshow = detail.profile.slideshow.clone();
                 let mut changed = ui.checkbox(&mut slideshow.enabled, "启用轮播").changed();
                 ui.horizontal(|ui| {
@@ -992,10 +1142,14 @@ impl eframe::App for StudioApp {
         context.request_repaint_after(Duration::from_millis(500));
         self.render_sidebar(ui);
         egui::CentralPanel::default()
-            .frame(Frame::new().fill(CANVAS).inner_margin(26.0))
+            .frame(
+                Frame::new()
+                    .fill(CANVAS)
+                    .inner_margin(egui::Margin::symmetric(28, 24)),
+            )
             .show(ui, |ui| {
                 if let Some((message, error)) = self.notice.clone() {
-                    notice_frame(ui, &message, if error { RED } else { BLUE });
+                    notice_frame(ui, &message, if error { RED } else { CYAN });
                     if ui.small_button("关闭").clicked() {
                         self.notice = None;
                     }
@@ -1006,7 +1160,7 @@ impl eframe::App for StudioApp {
                         Some(percent) => format!("{} · {:.0}%", progress.message, percent),
                         None => progress.message.clone(),
                     };
-                    notice_frame(ui, &text, BLUE);
+                    notice_frame(ui, &text, CYAN);
                     ui.add_space(12.0);
                 }
                 egui::ScrollArea::vertical().id_salt("page").show(ui, |ui| {
@@ -1302,45 +1456,67 @@ fn configure_fonts(context: &egui::Context) {
 }
 
 fn configure_style(context: &egui::Context) {
-    let mut style = (*context.style_of(egui::Theme::Light)).clone();
-    style.spacing.item_spacing = Vec2::new(8.0, 8.0);
-    style.spacing.button_padding = Vec2::new(12.0, 7.0);
-    style.visuals = egui::Visuals::light();
+    let mut style = (*context.style_of(egui::Theme::Dark)).clone();
+    style.spacing.item_spacing = Vec2::new(10.0, 10.0);
+    style.spacing.button_padding = Vec2::new(13.0, 8.0);
+    style.spacing.indent = 18.0;
+    style.visuals = egui::Visuals::dark();
     style.visuals.panel_fill = CANVAS;
-    style.visuals.widgets.inactive.corner_radius = 8.0.into();
-    style.visuals.widgets.hovered.corner_radius = 8.0.into();
-    style.visuals.widgets.active.corner_radius = 8.0.into();
-    style.visuals.selection.bg_fill = BLUE;
-    style.visuals.hyperlink_color = BLUE;
-    context.set_style_of(egui::Theme::Light, style);
+    style.visuals.window_fill = PAPER;
+    style.visuals.extreme_bg_color = RAIL;
+    style.visuals.faint_bg_color = PAPER_RAISED;
+    style.visuals.widgets.noninteractive.bg_fill = PAPER;
+    style.visuals.widgets.noninteractive.weak_bg_fill = PAPER;
+    style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
+    style.visuals.widgets.inactive.bg_fill = PAPER_RAISED;
+    style.visuals.widgets.inactive.weak_bg_fill = PAPER_RAISED;
+    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, LINE);
+    style.visuals.widgets.inactive.corner_radius = 9.0.into();
+    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(36, 49, 63);
+    style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(36, 49, 63);
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, CYAN_DIM);
+    style.visuals.widgets.hovered.corner_radius = 9.0.into();
+    style.visuals.widgets.active.bg_fill = CYAN_DIM;
+    style.visuals.widgets.active.weak_bg_fill = CYAN_DIM;
+    style.visuals.widgets.active.corner_radius = 9.0.into();
+    style.visuals.selection.bg_fill = CYAN_DIM;
+    style.visuals.selection.stroke = Stroke::new(1.0, CYAN);
+    style.visuals.hyperlink_color = CYAN;
+    context.set_style_of(egui::Theme::Dark, style);
 }
 
 fn navigation_button(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
-    let button = egui::Button::new(RichText::new(text).color(if selected {
-        Color32::WHITE
-    } else {
-        Color32::from_rgb(174, 188, 198)
-    }))
-    .fill(if selected {
-        Color32::from_rgb(35, 58, 80)
-    } else {
-        Color32::TRANSPARENT
-    })
-    .stroke(Stroke::NONE)
-    .corner_radius(9.0);
-    ui.add_sized([238.0, 38.0], button)
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(238.0, 42.0), egui::Sense::click());
+    if selected {
+        ui.painter().rect_filled(rect, 10.0, PAPER_RAISED);
+        let accent = egui::Rect::from_min_size(rect.min, Vec2::new(3.0, rect.height()));
+        ui.painter().rect_filled(accent, 2.0, CYAN);
+    } else if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, 10.0, Color32::from_rgb(18, 27, 36));
+    }
+    let text_pos = egui::pos2(rect.min.x + 18.0, rect.center().y);
+    ui.painter().text(
+        text_pos,
+        egui::Align2::LEFT_CENTER,
+        text,
+        egui::FontId::proportional(14.0),
+        if selected { INK } else { MUTED },
+    );
+    response
 }
 
 fn page_heading(ui: &mut egui::Ui, title: &str, subtitle: &str) {
-    ui.label(RichText::new(title).size(28.0).strong().color(INK));
+    ui.label(RichText::new(title).size(30.0).strong().color(INK));
+    ui.add_space(2.0);
     ui.label(RichText::new(subtitle).size(13.0).color(MUTED));
-    ui.add_space(18.0);
+    ui.add_space(20.0);
 }
 
 fn notice_frame(ui: &mut egui::Ui, message: &str, color: Color32) {
     Frame::new()
-        .fill(color.gamma_multiply(0.08))
-        .stroke(Stroke::new(1.0, color.gamma_multiply(0.3)))
+        .fill(color.gamma_multiply(0.12))
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.45)))
         .corner_radius(10.0)
         .inner_margin(12.0)
         .show(ui, |ui| {
@@ -1352,15 +1528,15 @@ fn metric(ui: &mut egui::Ui, label: &str, value: usize) {
     Frame::new()
         .fill(PAPER)
         .stroke(Stroke::new(1.0, LINE))
-        .corner_radius(12.0)
-        .inner_margin(14.0)
+        .corner_radius(14.0)
+        .inner_margin(16.0)
         .show(ui, |ui| {
-            ui.set_min_width(130.0);
+            ui.set_min_width(136.0);
             ui.label(
                 RichText::new(value.to_string())
-                    .size(24.0)
+                    .size(26.0)
                     .strong()
-                    .color(INK),
+                    .color(CYAN),
             );
             ui.label(RichText::new(label).size(11.0).color(MUTED));
         });
@@ -1374,7 +1550,7 @@ fn phase_color(phase: &str, running: bool) -> Color32 {
         "active" => GREEN,
         "error" => RED,
         "paused" | "waiting_manual" => AMBER,
-        "starting" | "takeover" | "attaching" => BLUE,
+        "starting" | "takeover" | "attaching" => CYAN,
         _ => MUTED,
     }
 }
@@ -1382,7 +1558,7 @@ fn phase_color(phase: &str, running: bool) -> Color32 {
 fn phase_dot(phase: &str, running: bool) -> &'static str {
     match phase_color(phase, running) {
         GREEN => "●",
-        BLUE => "◆",
+        CYAN => "◆",
         AMBER => "▲",
         RED => "■",
         _ => "○",
@@ -1401,14 +1577,15 @@ fn format_bytes(bytes: u64) -> String {
 
 fn thumbnail_placeholder(ui: &mut egui::Ui, size: Vec2, label: &str) {
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    ui.painter().rect_filled(rect, 9.0, PAPER_RAISED);
     ui.painter()
-        .rect_filled(rect, 7.0, Color32::from_rgb(231, 237, 242));
+        .rect_stroke(rect, 9.0, Stroke::new(1.0, LINE), egui::StrokeKind::Inside);
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         label,
         egui::FontId::monospace(11.0),
-        MUTED,
+        CYAN,
     );
 }
 
@@ -1438,7 +1615,7 @@ fn render_schema_fields(ui: &mut egui::Ui, fields: Option<&Map<String, Value>>, 
                     .unwrap_or(100.0);
                 let step = schema.get("step").and_then(Value::as_f64).unwrap_or(0.01);
                 let mut value = display.get(key).and_then(Value::as_f64).unwrap_or(minimum);
-                ui.label(RichText::new(title).size(12.0).color(MUTED));
+                ui.label(RichText::new(title).size(12.0).color(INK));
                 if ui
                     .add(
                         egui::Slider::new(&mut value, minimum..=maximum)
@@ -1480,7 +1657,7 @@ fn render_schema_fields(ui: &mut egui::Ui, fields: Option<&Map<String, Value>>, 
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
-                    ui.label(RichText::new(title).size(12.0).color(MUTED));
+                    ui.label(RichText::new(title).size(12.0).color(INK));
                     if ui.text_edit_singleline(&mut value).changed() {
                         display.insert(key.clone(), Value::String(value));
                     }
