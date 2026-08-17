@@ -1,32 +1,51 @@
 [package]
 name = "background-studio"
-version = "0.1.9-beta.1"
-description = "Background Studio host for Codex and Notion background plugins."
+version = "0.1.9-beta.2"
+description = "Lightweight native host for Codex, Notion, and Multica background workers."
 authors = ["Background Studio contributors"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.95"
 
 [lib]
 name = "background_studio_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-[build-dependencies]
-tauri-build = { version = "2.6.3", features = [] }
-
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-tauri = { version = "2.11.3", features = ["tray-icon", "protocol-asset"] }
-tauri-plugin-dialog = "2.7.2"
-tauri-plugin-opener = "2.5.4"
-tauri-plugin-single-instance = "2.4.3"
-tokio = { version = "1.53.1", features = ["fs", "io-util", "net", "time", "sync"] }
+tokio = { version = "1.53.1", features = ["fs", "io-util", "net", "time", "sync", "rt-multi-thread", "macros"] }
 reqwest = { version = "0.13.3", default-features = false, features = ["blocking", "json", "native-tls-no-alpn", "socks", "system-proxy"] }
 zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 winreg = "0.56.0"
 uuid = { version = "1.20.0", features = ["v4"] }
 semver = "1.0.28"
+sha2 = "0.10.9"
+imagesize = "0.15.0"
+tiny_http = "0.12.0"
+chrono = "0.4.45"
+url = "2.5.8"
+ipnet = "2.12.1"
+percent-encoding = "2.3.2"
+eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "avif"] }
+tray-icon = "0.24.2"
+rfd = "0.17.2"
+lru = "0.18.2"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_System_Com", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[package.metadata.packager]
+product-name = "Background Studio"
+identifier = "dev.backgroundstudio.host"
+formats = ["nsis"]
+out-dir = "../dist"
+before-packaging-command = "cargo build --release"
+icons = ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"]
+
+[package.metadata.packager.nsis]
+installer-icon = "icons/icon.ico"
+installMode = "currentUser"
+appdata-paths = ["$LOCALAPPDATA/BackgroundStudio"]
 
 [profile.release]
 codegen-units = 1
@@ -34,3 +53,6 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = true
+
+[build-dependencies]
+winresource = "0.1.31"

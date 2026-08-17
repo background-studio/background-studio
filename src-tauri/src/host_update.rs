@@ -8,7 +8,6 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
 
 use crate::proxy::{self, ProxySettings};
 
@@ -23,7 +22,6 @@ static GH_AUTHENTICATED: OnceLock<bool> = OnceLock::new();
 
 pub const HOST_OWNER: &str = "background-studio";
 pub const HOST_REPO: &str = "background-studio";
-pub const HOST_PROGRESS_EVENT: &str = "host:host-update-progress";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,14 +30,6 @@ pub struct HostReleaseInfo {
     pub asset_name: Option<String>,
     pub release_url: Option<String>,
     pub download_url: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HostUpdateProgress {
-    pub phase: String,
-    pub percent: Option<f64>,
-    pub message: String,
 }
 
 pub fn current_version() -> String {
@@ -249,17 +239,6 @@ mod tests {
         let message = format_github_api_error(404, r#"{"message":"Not Found"}"#);
         assert!(message.contains("找不到最新 Release"));
     }
-}
-
-pub fn emit_progress(app: &AppHandle, phase: &str, percent: Option<f64>, message: &str) {
-    let _ = app.emit(
-        HOST_PROGRESS_EVENT,
-        HostUpdateProgress {
-            phase: phase.to_string(),
-            percent,
-            message: message.to_string(),
-        },
-    );
 }
 
 pub fn download_with_progress<F>(

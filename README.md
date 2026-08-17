@@ -3,7 +3,7 @@
 [![org](https://img.shields.io/badge/org-background--studio-0ea5e9)](https://github.com/background-studio)
 [![release](https://img.shields.io/github/v/release/background-studio/background-studio)](https://github.com/background-studio/background-studio/releases)
 
-统一壳：Windows 托盘只显示一个 **Background Studio**，在后台安装、启停
+统一壳：Windows 托盘只显示一个 **Background Studio**，集中管理媒体、设置并在后台安装、启停
 [Codex](https://github.com/background-studio/codex_desktop_background) /
 [Notion](https://github.com/background-studio/notion_desktop_background) /
 [Multica](https://github.com/background-studio/multica_desktop_background) 背景插件。
@@ -30,9 +30,11 @@ scoop update background-studio
 
 - 单托盘宿主机
 - 从 GitHub Release 安装 / 更新 / 卸载插件（带下载进度）
-- 启用后以 `--plugin` 启动 worker（无独立托盘），自动等待并接管之后启动的目标程序
+- 共享媒体库、插件 Profile、轮播与统一插件详情页；插件不再各自维护 WebView 界面
+- 启用后以 `--plugin` 启动纯 Rust worker（无窗口、WebView 或独立托盘），自动等待并接管之后启动的目标程序
 - 启用前已经运行的目标不会被静默关闭，可从壳里手动“重启并接管”
-- Named Pipe 实时汇总等待 / 接管 / 活动状态，并转发打开设置 / 重新应用 / 暂停 / 恢复
+- 协议 2 通过 Named Pipe 下发回环媒体与显示设置，并实时汇总等待 / 接管 / 活动状态
+- 协议 1 插件可在升级期间继续启停和应用，但不提供统一媒体与设置能力
 - 「检查更新」同时检查插件与壳自身；可下载并启动壳安装包
 - 本机已安装并登录 [GitHub CLI](https://cli.github.com/)（`gh auth login`）时，查版优先走 `gh api`，不易撞匿名 API 限流；未登录则仍用匿名 HTTP
 - 仅注册壳自己的开机启动
@@ -43,18 +45,20 @@ scoop update background-studio
 
 ## 开发
 
-要求 Node.js 22+、Rust stable、MSVC C++ Build Tools、WebView2。
+要求 Rust stable（1.95+）和 MSVC C++ Build Tools。原生壳不依赖 Node.js 或 WebView2。
 
 ```powershell
-npm install
-npm run check
-npm run dev
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo run --manifest-path src-tauri/Cargo.toml
 ```
 
 打包：
 
 ```powershell
-npm run package:win
+cargo install cargo-packager --version 0.11.8 --locked
+cd src-tauri
+cargo packager --release
 ```
 
 ## 发布

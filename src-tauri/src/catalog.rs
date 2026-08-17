@@ -6,6 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+/// catalog 文件自身的协议标记。插件运行时 exe/pipe 以安装目录 plugin.json 为准。
 pub const PLUGIN_PROTOCOL: u32 = 1;
 
 const BUILTIN_CATALOG: &str = include_str!("../resources/catalog.json");

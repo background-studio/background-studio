@@ -14,15 +14,14 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
 
 use crate::{
-    catalog::{self, PluginDef, PLUGIN_PROTOCOL},
-    config, host_update, ipc,
+    catalog::{self, PluginDef},
+    config,
+    core::{load_from_install_dir, protocol::capability_labels, request, request_with_params},
+    host_update,
     proxy::{ProxyMode, ProxySettings},
 };
-
-pub const INSTALL_PROGRESS_EVENT: &str = "host:install-progress";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,6 +68,7 @@ pub struct PluginCard {
     /// 本地图标绝对路径；前端用 convertFileSrc 显示。缺省时回退 /plugins/{id}.png
     pub icon_path: Option<String>,
     pub icon_web: String,
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -224,6 +224,20 @@ impl PluginManager {
         if old_icons.exists() {
             copy_dir_recursive(&old_icons, &new_icons)?;
         }
+        for name in ["library.json", "migration-standalone-v1.marker"] {
+            let from = self.data_dir.join(name);
+            let to = new_root.join(name);
+            if from.is_file() && !to.exists() {
+                fs::copy(&from, &to).map_err(|error| error.to_string())?;
+            }
+        }
+        for name in ["media", "temporary", "profiles"] {
+            let from = self.data_dir.join(name);
+            let to = new_root.join(name);
+            if from.exists() {
+                copy_dir_recursive(&from, &to)?;
+            }
+        }
 
         self.data_dir = new_root;
         catalog::sync_bundled_icons(&self.data_dir)?;
@@ -232,6 +246,7 @@ impl PluginManager {
             self.state = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
         }
         self.save()?;
+        self.data_dir = config::set_data_root(&self.data_dir)?;
         self.start_enabled();
         Ok(())
     }
@@ -255,8 +270,39 @@ impl PluginManager {
         self.data_dir.join("plugins").join(id).join(version)
     }
 
-    fn exe_path(&self, spec: &PluginDef, version: &str) -> PathBuf {
-        self.install_dir(&spec.id, version).join(&spec.exe_name)
+    fn exe_path(&self, id: &str, version: &str) -> Result<PathBuf, String> {
+        let dir = self.install_dir(id, version);
+        if let Some(manifest) = load_from_install_dir(&dir)? {
+            return Ok(manifest.exe_path(&dir));
+        }
+        Ok(dir.join(&self.spec(id)?.exe_name))
+    }
+
+    pub fn pipe_name(&self, id: &str) -> Result<String, String> {
+        if let Some(manifest) = self.installed_manifest(id) {
+            return Ok(manifest.pipe_name);
+        }
+        Ok(self.spec(id)?.pipe_name.clone())
+    }
+
+    pub fn installed_manifest(&self, id: &str) -> Option<crate::core::ParsedManifest> {
+        let version = self
+            .state
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == id)?
+            .installed_version
+            .as_ref()?;
+        load_from_install_dir(&self.install_dir(id, version))
+            .ok()
+            .flatten()
+    }
+
+    pub fn is_enabled(&self, id: &str) -> bool {
+        self.state
+            .plugins
+            .iter()
+            .any(|plugin| plugin.id == id && plugin.enabled && plugin.installed_version.is_some())
     }
 
     pub fn refresh_latest(&mut self) -> Result<(), String> {
@@ -291,25 +337,10 @@ impl PluginManager {
         &self.host_release
     }
 
-    fn emit_install_progress(
-        app: &AppHandle,
-        id: &str,
-        phase: &str,
-        percent: Option<f64>,
-        message: &str,
-    ) {
-        let _ = app.emit(
-            INSTALL_PROGRESS_EVENT,
-            InstallProgress {
-                id: id.to_string(),
-                phase: phase.to_string(),
-                percent,
-                message: message.to_string(),
-            },
-        );
-    }
-
-    pub fn install(&mut self, id: &str, app: &AppHandle) -> Result<(), String> {
+    pub fn install<F>(&mut self, id: &str, mut on_progress: F) -> Result<(), String>
+    where
+        F: FnMut(&str, Option<f64>, &str),
+    {
         if !self.latest.contains_key(id) {
             self.refresh_latest()?;
         }
@@ -334,7 +365,7 @@ impl PluginManager {
             format!("https://github.com/{owner}/{repo}/releases/download/{tag}/{asset_name}");
         let zip_path = self.data_dir.join(format!("{id}-{version_dir}-plugin.zip"));
         let proxy = self.state.proxy.clone();
-        Self::emit_install_progress(app, id, "download", Some(0.0), "开始下载…");
+        on_progress("download", Some(0.0), "开始下载…");
         let mut last_reported = 0u8;
         host_update::download_with_progress(
             &download_url,
@@ -348,38 +379,77 @@ impl PluginManager {
                 let bucket = percent.floor() as u8 / 2;
                 if bucket != last_reported || downloaded == total.unwrap_or(downloaded) {
                     last_reported = bucket;
-                    Self::emit_install_progress(
-                        app,
-                        id,
-                        "download",
-                        Some(percent),
-                        &format!("下载中 {percent:.0}%"),
-                    );
+                    on_progress("download", Some(percent), &format!("下载中 {percent:.0}%"));
                 }
             },
         )?;
-        Self::emit_install_progress(app, id, "extract", None, "解压中…");
+        on_progress("extract", None, "解压中…");
         let target = self.install_dir(id, &version_dir);
-        if target.exists() {
-            fs::remove_dir_all(&target).map_err(|error| error.to_string())?;
+        let staging = target.with_file_name(format!(
+            ".{}.{}.installing",
+            version_dir,
+            uuid::Uuid::new_v4()
+        ));
+        let backup =
+            target.with_file_name(format!(".{}.{}.backup", version_dir, uuid::Uuid::new_v4()));
+        fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
+        if let Err(error) = extract_zip(&zip_path, &staging) {
+            let _ = fs::remove_dir_all(&staging);
+            let _ = fs::remove_file(&zip_path);
+            return Err(error);
         }
-        fs::create_dir_all(&target).map_err(|error| error.to_string())?;
-        extract_zip(&zip_path, &target)?;
         let _ = fs::remove_file(&zip_path);
-        let exe = target.join(&exe_name);
-        if !exe.exists() {
-            return Err(format!("插件包缺少可执行文件：{exe_name}"));
+        match load_from_install_dir(&staging) {
+            Ok(Some(manifest)) => {
+                if manifest.id != id {
+                    let _ = fs::remove_dir_all(&staging);
+                    return Err(format!(
+                        "plugin.json 的 id 为 {}，与目录插件 {id} 不一致。",
+                        manifest.id
+                    ));
+                }
+                if !manifest.exe_path(&staging).exists() {
+                    let _ = fs::remove_dir_all(&staging);
+                    return Err(format!("插件包缺少可执行文件：{}", manifest.exe_name));
+                }
+            }
+            Ok(None) => {
+                if !staging.join(&exe_name).exists() {
+                    let _ = fs::remove_dir_all(&staging);
+                    return Err(format!("插件包缺少可执行文件：{exe_name}"));
+                }
+            }
+            Err(error) => {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(error);
+            }
         }
-        Self::emit_install_progress(app, id, "start", None, "启动中…");
+        self.stop(id)?;
+        if target.exists() {
+            fs::rename(&target, &backup).map_err(|error| {
+                let _ = fs::remove_dir_all(&staging);
+                error.to_string()
+            })?;
+        }
+        if let Err(error) = fs::rename(&staging, &target) {
+            if backup.exists() {
+                let _ = fs::rename(&backup, &target);
+            }
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error.to_string());
+        }
+        if backup.exists() {
+            let _ = fs::remove_dir_all(&backup);
+        }
+        on_progress("start", None, "启动中…");
         {
             let record = self.record_mut(id)?;
             record.installed_version = Some(version_dir);
             record.enabled = true;
         }
         self.save()?;
-        // start 内部会先停掉该插件目录下所有旧进程（含孤儿），再拉起当前版本。
         self.start(id)?;
-        Self::emit_install_progress(app, id, "done", Some(100.0), "安装完成");
+        on_progress("done", Some(100.0), "安装完成");
         Ok(())
     }
 
@@ -427,10 +497,7 @@ impl PluginManager {
             .find(|plugin| plugin.id == id)
             .and_then(|plugin| plugin.installed_version.clone())
             .ok_or_else(|| "插件尚未安装。".to_string())?;
-        let exe = {
-            let spec = self.spec(id)?;
-            self.exe_path(spec, &version)
-        };
+        let exe = self.exe_path(id, &version)?;
         if !exe.exists() {
             return Err(format!("找不到插件可执行文件：{}", exe.display()));
         }
@@ -446,15 +513,46 @@ impl PluginManager {
     }
 
     pub fn stop(&mut self, id: &str) -> Result<(), String> {
+        let graceful_pipe = self
+            .installed_manifest(id)
+            .filter(|manifest| manifest.plugin_protocol >= 2)
+            .map(|manifest| manifest.pipe_name);
+        let graceful_requested = graceful_pipe
+            .as_deref()
+            .is_some_and(|pipe| request_shutdown_blocking(pipe).is_ok());
         if let Some(mut child) = self.children.remove(id) {
-            let _ = child.kill();
+            let deadline = Instant::now()
+                + if graceful_requested {
+                    Duration::from_secs(2)
+                } else {
+                    Duration::ZERO
+                };
+            let exited = loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break true,
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    _ => break false,
+                }
+            };
+            if !exited {
+                let _ = child.kill();
+            }
             let _ = child.wait();
         }
-        let exe_name = self.spec(id)?.exe_name.clone();
+        let exe_name = self
+            .installed_manifest(id)
+            .map(|manifest| manifest.exe_name)
+            .unwrap_or_else(|| {
+                self.spec(id)
+                    .map(|spec| spec.exe_name.clone())
+                    .unwrap_or_default()
+            });
         let plugin_root = self.data_dir.join("plugins").join(id);
         kill_processes_under_plugin_root(&plugin_root, &exe_name);
-        // 给单实例 / 命名管道一点释放时间，否则紧接着 start 新版仍可能被旧实例挡掉。
-        std::thread::sleep(Duration::from_millis(400));
+        // 给命名管道一点释放时间，否则紧接着 start 新版仍可能被旧实例挡掉。
+        std::thread::sleep(Duration::from_millis(200));
         Ok(())
     }
 
@@ -496,14 +594,14 @@ impl PluginManager {
     }
 
     pub async fn wait_until_ready(&mut self, id: &str) -> Result<Value, String> {
-        let pipe = self.spec(id)?.pipe_name.clone();
+        let pipe = self.pipe_name(id)?;
         let deadline = Instant::now() + Duration::from_secs(8);
         let mut last_error = "插件尚未创建控制管道。".to_string();
         loop {
             if !self.is_running(id) {
                 return Err(format!("插件启动后意外退出：{last_error}"));
             }
-            match ipc::request(&pipe, "status").await {
+            match request(&pipe, "status").await {
                 Ok(status) => return Ok(status),
                 Err(error) => last_error = error,
             }
@@ -514,22 +612,21 @@ impl PluginManager {
         }
     }
 
-    pub async fn plugin_command(&mut self, id: &str, cmd: &str) -> Result<Value, String> {
-        let enabled = self
-            .state
-            .plugins
-            .iter()
-            .find(|plugin| plugin.id == id)
-            .is_some_and(|plugin| plugin.enabled && plugin.installed_version.is_some());
-        if !enabled {
+    pub async fn plugin_request(
+        &mut self,
+        id: &str,
+        cmd: &str,
+        params: Option<Value>,
+    ) -> Result<Value, String> {
+        if !self.is_enabled(id) {
             return Err("请先启用插件。".to_string());
         }
-        let pipe = self.spec(id)?.pipe_name.clone();
+        let pipe = self.pipe_name(id)?;
         if !self.is_running(id) {
             self.start(id)?;
         }
         self.wait_until_ready(id).await?;
-        ipc::request(&pipe, cmd).await
+        request_with_params(&pipe, cmd, params.as_ref()).await
     }
 
     pub async fn snapshot(&mut self) -> HostSnapshot {
@@ -575,8 +672,11 @@ impl PluginManager {
                 "已启用".to_string()
             };
             let mut phase = "idle".to_string();
+            let pipe = self
+                .pipe_name(&plugin.id)
+                .unwrap_or_else(|_| plugin.pipe_name.clone());
             if running {
-                match ipc::request(&plugin.pipe_name, "status").await {
+                match request(&pipe, "status").await {
                     Ok(status) => {
                         phase = status
                             .get("phase")
@@ -603,6 +703,7 @@ impl PluginManager {
             };
             let icon_path = catalog::resolve_icon_path(&self.data_dir, &plugin)
                 .map(|path| path.to_string_lossy().into_owned());
+            let manifest = self.installed_manifest(&plugin.id);
             cards.push(PluginCard {
                 id: plugin.id.clone(),
                 display_name: plugin.display_name.clone(),
@@ -618,10 +719,16 @@ impl PluginManager {
                 running,
                 status_message,
                 phase,
-                plugin_protocol: PLUGIN_PROTOCOL,
+                plugin_protocol: manifest
+                    .as_ref()
+                    .map(|manifest| manifest.plugin_protocol)
+                    .unwrap_or(1),
                 update_available,
                 icon_path,
                 icon_web: format!("/plugins/{}.png", plugin.id),
+                capabilities: manifest
+                    .map(|manifest| capability_labels(&manifest.capabilities))
+                    .unwrap_or_default(),
             });
         }
         let host_version = host_update::current_version();
@@ -655,11 +762,44 @@ impl PluginManager {
     }
 }
 
+fn request_shutdown_blocking(pipe_name: &str) -> Result<Value, String> {
+    let pipe_name = pipe_name.to_string();
+    std::thread::Builder::new()
+        .name("plugin-shutdown".to_string())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?;
+            runtime.block_on(request(&pipe_name, "shutdown"))
+        })
+        .map_err(|error| error.to_string())?
+        .join()
+        .map_err(|_| "插件 shutdown 线程异常退出。".to_string())?
+}
+
 fn extract_zip(zip_path: &Path, target: &Path) -> Result<(), String> {
+    const MAX_ARCHIVE_ENTRIES: usize = 128;
+    const MAX_ARCHIVE_FILE_BYTES: u64 = 128 * 1024 * 1024;
+    const MAX_ARCHIVE_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+
     let file = File::open(zip_path).map_err(|error| error.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
+    if archive.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(format!("插件包文件数超过 {MAX_ARCHIVE_ENTRIES} 项上限。"));
+    }
+    let mut total_size = 0u64;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
+        if entry.size() > MAX_ARCHIVE_FILE_BYTES {
+            return Err("插件包中单个文件超过 128 MiB 上限。".to_string());
+        }
+        total_size = total_size
+            .checked_add(entry.size())
+            .ok_or_else(|| "插件包解压大小溢出。".to_string())?;
+        if total_size > MAX_ARCHIVE_TOTAL_BYTES {
+            return Err("插件包解压后超过 256 MiB 上限。".to_string());
+        }
         let name = entry
             .enclosed_name()
             .ok_or_else(|| "插件包包含非法路径。".to_string())?

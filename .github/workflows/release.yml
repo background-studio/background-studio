@@ -23,61 +23,56 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: 22
-          cache: npm
-
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
 
       - name: Cache Rust build artifacts
         uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
 
-      - name: Install frontend dependencies
-        run: npm ci
-
       - name: Verify tag and application versions
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
-          $npmVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
           $cargo = cargo metadata --manifest-path src-tauri/Cargo.toml --no-deps --format-version 1 | ConvertFrom-Json
           $cargoVersion = ($cargo.packages | Where-Object name -eq "background-studio").version
-          if ($tag -ne "v$npmVersion") {
-            throw "标签 $tag 与 package.json 版本 v$npmVersion 不一致。"
-          }
-          if ($tauriVersion -ne $npmVersion -or $cargoVersion -ne $npmVersion) {
-            throw "package.json、tauri.conf.json 与 Cargo.toml 的版本号不一致。"
+          if ($tag -ne "v$cargoVersion") {
+            throw "标签 $tag 与 Cargo.toml 版本 v$cargoVersion 不一致。"
           }
 
       - name: Run checks
-        run: npm run check
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+          cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --version 0.11.8 --locked
+
+      - name: Build NSIS installer
+        working-directory: src-tauri
+        run: cargo packager --release
 
       - name: Build and publish GitHub Release
-        uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Background Studio ${{ github.ref_name }}"
-          releaseBody: |
-            Background Studio 壳（pluginProtocol: 1）。
-
-            - 白底扁平 UI；左侧为组织品牌图标
-            - 插件列表由 catalog 动态加载（内置 Codex / Notion / Multica，可本地扩展）
-            - 支持更改插件数据目录
-            - 插件安装进度；壳自身可检查更新
-            - Scoop：`scoop bucket add background-studio https://github.com/background-studio/scoop-bucket`
-
-            安装后请在界面中从各自 Release 安装插件（`*-plugin.zip`）。
-            动态加插件与迁移说明见 `docs/plugin-protocol.md`、`docs/migration.md`。
-          releaseDraft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          $asset = Get-ChildItem dist -Filter "*setup.exe" | Select-Object -First 1
+          if (-not $asset) {
+            throw "cargo-packager 没有生成 NSIS 安装包。"
+          }
+          $releaseAsset = Join-Path $asset.DirectoryName "Background.Studio_${version}_x64-setup.exe"
+          Move-Item $asset.FullName $releaseAsset -Force
+          $prerelease = if ($tag.Contains("-")) { @("--prerelease") } else { @() }
+          gh release create $tag $releaseAsset `
+            --title "Background Studio $tag" `
+            --generate-notes `
+            @prerelease
 
       - name: Notify scoop-bucket to sync manifest
         if: ${{ !contains(github.ref_name, '-') }}
