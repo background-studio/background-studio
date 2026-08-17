@@ -68,11 +68,15 @@ jobs:
           }
           $releaseAsset = Join-Path $asset.DirectoryName "Background.Studio_${version}_x64-setup.exe"
           Move-Item $asset.FullName $releaseAsset -Force
-          $prerelease = if ($tag.Contains("-")) { @("--prerelease") } else { @() }
-          gh release create $tag $releaseAsset `
-            --title "Background Studio $tag" `
-            --generate-notes `
-            @prerelease
+          $releaseArgs = @(
+            "release", "create", $tag, $releaseAsset,
+            "--title", "Background Studio $tag",
+            "--generate-notes"
+          )
+          if ($tag.Contains("-")) {
+            $releaseArgs += "--prerelease"
+          }
+          gh @releaseArgs
 
       - name: Notify scoop-bucket to sync manifest
         if: ${{ !contains(github.ref_name, '-') }}
