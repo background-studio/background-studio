@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     num::NonZeroUsize,
     path::PathBuf,
     sync::{mpsc, Arc},
@@ -19,7 +19,10 @@ use tray_icon::{
 
 use crate::{
     config,
-    core::{HostCore, PluginDetail, ProfilePatch, SharedMediaKind, SlideshowOrder, SlideshowPatch},
+    core::{
+        HostCore, PluginDetail, ProfilePatch, SharedMediaKind, SlideshowOrder, SlideshowPatch,
+        SlideshowSettings,
+    },
     desktop,
     plugins::{HostSnapshot, InstallProgress},
     proxy::{ProxyMode, ProxySettings},
@@ -164,6 +167,11 @@ struct StudioApp {
     thumbnail_bytes: usize,
     thumbnail_directory: PathBuf,
     tray: TrayUi,
+    logo: Option<egui::TextureHandle>,
+    proxy_draft: Option<ProxySettings>,
+    host_draft: Option<(bool, bool)>,
+    enabled_draft: HashMap<String, bool>,
+    slideshow_draft: Option<(String, SlideshowSettings)>,
     _instance: PrimaryInstance,
     quitting: bool,
 }
@@ -229,6 +237,11 @@ impl StudioApp {
             thumbnail_bytes: 0,
             thumbnail_directory: thumbnails::cache_directory(&data_dir),
             tray,
+            logo: load_sidebar_logo(&creation.egui_ctx),
+            proxy_draft: None,
+            host_draft: None,
+            enabled_draft: HashMap::new(),
+            slideshow_draft: None,
             _instance: instance,
             quitting: false,
         };
@@ -282,11 +295,46 @@ impl StudioApp {
                         self.thumbnail_loading.clear();
                         self.thumbnail_bytes = 0;
                     }
+                    if self.proxy_draft.as_ref().is_some_and(|draft| {
+                        draft.mode == snapshot.proxy_mode && draft.url == snapshot.proxy_url
+                    }) {
+                        self.proxy_draft = None;
+                    }
+                    if self.host_draft
+                        == Some((snapshot.auto_start_with_windows, snapshot.start_minimized))
+                    {
+                        self.host_draft = None;
+                    }
+                    self.enabled_draft.retain(|id, enabled| {
+                        snapshot
+                            .plugins
+                            .iter()
+                            .find(|plugin| plugin.id == *id)
+                            .is_some_and(|plugin| plugin.enabled != *enabled)
+                    });
                     self.snapshot = Some(snapshot);
                 }
                 UiEvent::Detail(id, detail) => {
                     if self.selected_plugin.as_deref() == Some(id.as_str()) {
-                        self.display_draft = detail.profile.display.clone();
+                        let previous_saved = self
+                            .detail
+                            .as_ref()
+                            .map(|item| item.profile.display.clone());
+                        let draft_dirty = previous_saved
+                            .as_ref()
+                            .is_some_and(|saved| *saved != self.display_draft);
+                        if !draft_dirty {
+                            self.display_draft = detail.profile.display.clone();
+                        }
+                        if self
+                            .slideshow_draft
+                            .as_ref()
+                            .is_some_and(|(plugin, settings)| {
+                                plugin == &id && *settings == detail.profile.slideshow
+                            })
+                        {
+                            self.slideshow_draft = None;
+                        }
                         self.detail = Some(detail);
                     }
                 }
@@ -340,6 +388,9 @@ impl StudioApp {
     }
 
     fn open_plugin(&mut self, id: String) {
+        if self.selected_plugin.as_deref() != Some(id.as_str()) {
+            self.slideshow_draft = None;
+        }
         self.selected_plugin = Some(id.clone());
         self.detail = None;
         self.dispatch(Command::LoadDetail(id));
@@ -393,21 +444,17 @@ impl StudioApp {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(42.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 12.0, PAPER_RAISED);
-                    ui.painter().rect_stroke(
-                        rect,
-                        12.0,
-                        Stroke::new(1.0, BRASS),
-                        egui::StrokeKind::Inside,
-                    );
-                    ui.painter().text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "BS",
-                        egui::FontId::proportional(15.0),
-                        BRASS,
-                    );
+                    if let Some(logo) = self.logo.clone() {
+                        ui.add(
+                            egui::Image::new(&logo)
+                                .fit_to_exact_size(Vec2::splat(44.0))
+                                .corner_radius(12.0),
+                        );
+                    } else {
+                        let (rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(44.0), egui::Sense::hover());
+                        ui.painter().rect_filled(rect, 12.0, PAPER_RAISED);
+                    }
                     ui.add_space(10.0);
                     ui.vertical(|ui| {
                         ui.label(
@@ -645,7 +692,11 @@ impl StudioApp {
                                 self.dispatch(Command::Install(plugin.id.clone()));
                             }
                         } else {
-                            let mut enabled = plugin.enabled;
+                            let mut enabled = self
+                                .enabled_draft
+                                .get(&plugin.id)
+                                .copied()
+                                .unwrap_or(plugin.enabled);
                             if ui
                                 .add_enabled(
                                     self.busy_count == 0,
@@ -653,6 +704,7 @@ impl StudioApp {
                                 )
                                 .changed()
                             {
+                                self.enabled_draft.insert(plugin.id.clone(), enabled);
                                 self.dispatch(Command::SetEnabled(plugin.id.clone(), enabled));
                             }
                             if plugin.update_available
@@ -717,11 +769,13 @@ impl StudioApp {
                     });
                 });
                 ui.add_space(10.0);
-                let mut auto_start = snapshot.auto_start_with_windows;
-                let mut minimized = snapshot.start_minimized;
+                let (mut auto_start, mut minimized) = self
+                    .host_draft
+                    .unwrap_or((snapshot.auto_start_with_windows, snapshot.start_minimized));
                 let auto_changed = ui.checkbox(&mut auto_start, "随 Windows 启动").changed();
                 let minimized_changed = ui.checkbox(&mut minimized, "启动后最小化").changed();
                 if auto_changed || minimized_changed {
+                    self.host_draft = Some((auto_start, minimized));
                     self.dispatch(Command::UpdateHostSettings(auto_start, minimized));
                 }
                 ui.separator();
@@ -753,22 +807,34 @@ impl StudioApp {
                     }
                 });
                 ui.separator();
-                let original_mode = snapshot.proxy_mode.clone();
-                let original_url = snapshot.proxy_url.clone();
-                let mut mode = original_mode.clone();
-                let mut url = original_url.clone();
+                let mut settings = self.proxy_draft.clone().unwrap_or(ProxySettings {
+                    mode: snapshot.proxy_mode.clone(),
+                    url: snapshot.proxy_url.clone(),
+                });
+                let before = settings.clone();
+                let mut url_committed = false;
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("代理").color(MUTED));
-                    ui.selectable_value(&mut mode, ProxyMode::Off, "关闭");
-                    ui.selectable_value(&mut mode, ProxyMode::System, "系统");
-                    ui.selectable_value(&mut mode, ProxyMode::Custom, "自定义");
+                    proxy_mode_chip(ui, &mut settings.mode, ProxyMode::Off, "关闭");
+                    proxy_mode_chip(ui, &mut settings.mode, ProxyMode::System, "系统");
+                    proxy_mode_chip(ui, &mut settings.mode, ProxyMode::Custom, "自定义");
                 });
-                if mode == ProxyMode::Custom {
-                    ui.text_edit_singleline(&mut url);
+                if settings.mode == ProxyMode::Custom {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("地址").color(MUTED));
+                        let edit = ui.add(
+                            egui::TextEdit::singleline(&mut settings.url)
+                                .desired_width(280.0)
+                                .hint_text("http://127.0.0.1:7890"),
+                        );
+                        url_committed = edit.lost_focus();
+                    });
                 }
-                if (mode != original_mode || url != original_url) && ui.button("保存代理").clicked()
-                {
-                    self.dispatch(Command::UpdateProxy(ProxySettings { mode, url }));
+                if settings != before {
+                    self.proxy_draft = Some(settings.clone());
+                }
+                if settings.mode != before.mode || (url_committed && settings.url != before.url) {
+                    self.dispatch(Command::UpdateProxy(settings));
                 }
             });
     }
@@ -1086,21 +1152,47 @@ impl StudioApp {
                 }
                 ui.separator();
                 ui.label(RichText::new("轮播").strong().color(INK));
-                let mut slideshow = detail.profile.slideshow.clone();
-                let mut changed = ui.checkbox(&mut slideshow.enabled, "启用轮播").changed();
+                let mut slideshow = self
+                    .slideshow_draft
+                    .as_ref()
+                    .filter(|(id, _)| id == plugin_id)
+                    .map(|(_, settings)| settings.clone())
+                    .unwrap_or_else(|| detail.profile.slideshow.clone());
+                let before = slideshow.clone();
+                let saved = detail.profile.slideshow.clone();
+                let enabled_changed = ui.checkbox(&mut slideshow.enabled, "启用轮播").changed();
+                let mut interval_response = None;
                 ui.horizontal(|ui| {
                     ui.label("间隔");
-                    changed |= ui
-                        .add(
+                    interval_response = Some(
+                        ui.add(
                             egui::DragValue::new(&mut slideshow.interval_seconds)
                                 .range(10..=86_400)
                                 .suffix(" 秒"),
-                        )
-                        .changed();
-                    ui.selectable_value(&mut slideshow.order, SlideshowOrder::Sequential, "顺序");
-                    ui.selectable_value(&mut slideshow.order, SlideshowOrder::Random, "随机");
+                        ),
+                    );
+                    slideshow_order_chip(
+                        ui,
+                        &mut slideshow.order,
+                        SlideshowOrder::Sequential,
+                        "顺序",
+                    );
+                    slideshow_order_chip(ui, &mut slideshow.order, SlideshowOrder::Random, "随机");
                 });
-                if changed && ui.button("保存轮播").clicked() {
+                let interval_response =
+                    interval_response.expect("interval drag value is always created");
+                if slideshow != before {
+                    self.slideshow_draft = Some((plugin_id.to_string(), slideshow.clone()));
+                }
+                let interval_stepped = slideshow.interval_seconds != before.interval_seconds
+                    && !interval_response.dragged();
+                let interval_committed = slideshow.interval_seconds != saved.interval_seconds
+                    && (interval_response.lost_focus() || interval_response.drag_stopped());
+                if enabled_changed
+                    || slideshow.order != before.order
+                    || interval_stepped
+                    || interval_committed
+                {
                     self.dispatch(Command::UpdateProfile(
                         plugin_id.to_string(),
                         ProfilePatch {
@@ -1417,6 +1509,47 @@ fn setup_tray(tx: mpsc::Sender<UiEvent>, context: egui::Context) -> Result<TrayU
         .build()
         .map_err(|error| error.to_string())?;
     Ok(TrayUi { icon, status })
+}
+
+fn load_sidebar_logo(context: &egui::Context) -> Option<egui::TextureHandle> {
+    let image = image::load_from_memory(include_bytes!("../icons/128x128.png"))
+        .ok()?
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    let color =
+        egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], image.as_raw());
+    Some(context.load_texture("host-logo", color, egui::TextureOptions::LINEAR))
+}
+
+fn proxy_mode_chip(ui: &mut egui::Ui, current: &mut ProxyMode, mode: ProxyMode, label: &str) {
+    let selected = *current == mode;
+    if ui
+        .add(
+            egui::Button::new(RichText::new(label).color(if selected { INK } else { MUTED }))
+                .fill(if selected { CYAN_DIM } else { PAPER_RAISED }),
+        )
+        .clicked()
+    {
+        *current = mode;
+    }
+}
+
+fn slideshow_order_chip(
+    ui: &mut egui::Ui,
+    current: &mut SlideshowOrder,
+    order: SlideshowOrder,
+    label: &str,
+) {
+    let selected = *current == order;
+    if ui
+        .add(
+            egui::Button::new(RichText::new(label).color(if selected { INK } else { MUTED }))
+                .fill(if selected { CYAN_DIM } else { PAPER_RAISED }),
+        )
+        .clicked()
+    {
+        *current = order;
+    }
 }
 
 fn load_tray_icon() -> Result<Icon, String> {

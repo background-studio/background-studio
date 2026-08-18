@@ -44,7 +44,7 @@ pub use self::{
     ipc::{request, request_with_params},
     manifest::{load_from_install_dir, PluginManifest as ParsedManifest},
     models::{MediaKind as SharedMediaKind, SlideshowOrder},
-    profile::{ProfilePatch, SlideshowPatch},
+    profile::{ProfilePatch, SlideshowPatch, SlideshowSettings},
 };
 
 pub struct HostCore {

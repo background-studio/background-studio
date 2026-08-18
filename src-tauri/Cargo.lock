@@ -513,7 +513,7 @@ dependencies = [
 
 [[package]]
 name = "background-studio"
-version = "0.1.9-beta.3"
+version = "0.1.9-beta.4"
 dependencies = [
  "chrono",
  "eframe",
