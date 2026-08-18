@@ -468,7 +468,7 @@ impl StudioApp {
                 });
                 ui.add_space(28.0);
                 let overview_selected = self.selected_plugin.is_none();
-                if navigation_button(ui, "控制台", overview_selected).clicked() {
+                if navigation_button(ui, "控制台", None, overview_selected).clicked() {
                     self.selected_plugin = None;
                     self.detail = None;
                 }
@@ -492,7 +492,8 @@ impl StudioApp {
                         phase_dot(&plugin.phase, plugin.running),
                         plugin.display_name
                     );
-                    if navigation_button(ui, &label, selected).clicked() {
+                    let version = plugin_version_label(&plugin);
+                    if navigation_button(ui, &label, Some(&version), selected).clicked() {
                         self.open_plugin(plugin.id);
                     }
                 }
@@ -613,16 +614,17 @@ impl StudioApp {
                             egui::FontId::proportional(13.0),
                             INK,
                         );
+                        let status = if plugin.running {
+                            "worker 在线"
+                        } else if plugin.installed_version.is_some() {
+                            "已安装"
+                        } else {
+                            "待安装"
+                        };
                         ui.painter().text(
                             rect.left_center() + egui::vec2(36.0, 10.0),
                             egui::Align2::LEFT_CENTER,
-                            if plugin.running {
-                                "worker 在线"
-                            } else if plugin.installed_version.is_some() {
-                                "已安装"
-                            } else {
-                                "待安装"
-                            },
+                            format!("{status} · {}", plugin_version_label(plugin)),
                             egui::FontId::proportional(10.0),
                             MUTED,
                         );
@@ -663,12 +665,23 @@ impl StudioApp {
                     ui.painter().circle_filled(rect.center(), 7.0, color);
                     ui.add_space(14.0);
                     ui.vertical(|ui| {
-                        ui.label(
-                            RichText::new(&plugin.display_name)
-                                .size(17.0)
-                                .strong()
-                                .color(INK),
-                        );
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(&plugin.display_name)
+                                    .size(17.0)
+                                    .strong()
+                                    .color(INK),
+                            );
+                            ui.label(
+                                RichText::new(plugin_version_label(&plugin))
+                                    .size(12.0)
+                                    .color(if plugin.update_available {
+                                        AMBER
+                                    } else {
+                                        BRASS
+                                    }),
+                            );
+                        });
                         ui.label(RichText::new(&plugin.target_hint).size(12.0).color(MUTED));
                         ui.label(
                             RichText::new(&plugin.status_message)
@@ -852,8 +865,11 @@ impl StudioApp {
             ui,
             &detail.plugin.display_name,
             &format!(
-                "{} · 协议 {} · {}",
-                detail.plugin.target_hint, detail.plugin_protocol, detail.plugin.status_message
+                "{} · {} · 协议 {} · {}",
+                detail.plugin.target_hint,
+                plugin_version_label(&detail.plugin),
+                detail.plugin_protocol,
+                detail.plugin.status_message
             ),
         );
         Frame::new()
@@ -1618,8 +1634,33 @@ fn configure_style(context: &egui::Context) {
     context.set_style_of(egui::Theme::Dark, style);
 }
 
-fn navigation_button(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(238.0, 42.0), egui::Sense::click());
+fn plugin_version_label(plugin: &crate::plugins::PluginCard) -> String {
+    match (
+        plugin.installed_version.as_deref(),
+        plugin.latest_version.as_deref(),
+        plugin.update_available,
+    ) {
+        (Some(installed), Some(latest), true) => {
+            format!("{} → {}", strip_v(installed), strip_v(latest))
+        }
+        (Some(installed), _, _) => strip_v(installed).to_string(),
+        (None, Some(latest), _) => format!("未安装 · {}", strip_v(latest)),
+        (None, None, _) => "未安装".to_string(),
+    }
+}
+
+fn strip_v(version: &str) -> &str {
+    version.trim_start_matches('v')
+}
+
+fn navigation_button(
+    ui: &mut egui::Ui,
+    text: &str,
+    subtitle: Option<&str>,
+    selected: bool,
+) -> egui::Response {
+    let height = if subtitle.is_some() { 54.0 } else { 42.0 };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(238.0, height), egui::Sense::click());
     if selected {
         ui.painter().rect_filled(rect, 10.0, PAPER_RAISED);
         let accent = egui::Rect::from_min_size(rect.min, Vec2::new(3.0, rect.height()));
@@ -1628,14 +1669,34 @@ fn navigation_button(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Res
         ui.painter()
             .rect_filled(rect, 10.0, Color32::from_rgb(18, 27, 36));
     }
-    let text_pos = egui::pos2(rect.min.x + 18.0, rect.center().y);
-    ui.painter().text(
-        text_pos,
-        egui::Align2::LEFT_CENTER,
-        text,
-        egui::FontId::proportional(14.0),
-        if selected { INK } else { MUTED },
-    );
+    if let Some(subtitle) = subtitle {
+        ui.painter().text(
+            egui::pos2(rect.min.x + 18.0, rect.center().y - 8.0),
+            egui::Align2::LEFT_CENTER,
+            text,
+            egui::FontId::proportional(14.0),
+            if selected { INK } else { MUTED },
+        );
+        ui.painter().text(
+            egui::pos2(rect.min.x + 18.0, rect.center().y + 10.0),
+            egui::Align2::LEFT_CENTER,
+            subtitle,
+            egui::FontId::proportional(11.0),
+            if selected {
+                BRASS
+            } else {
+                Color32::from_rgb(102, 118, 132)
+            },
+        );
+    } else {
+        ui.painter().text(
+            egui::pos2(rect.min.x + 18.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            text,
+            egui::FontId::proportional(14.0),
+            if selected { INK } else { MUTED },
+        );
+    }
     response
 }
 
