@@ -1,6 +1,6 @@
 [package]
 name = "background-studio"
-version = "0.1.9-beta.4"
+version = "0.2.0"
 description = "Lightweight native host for Codex, Notion, and Multica background workers."
 authors = ["Background Studio contributors"]
 license = "MIT"
