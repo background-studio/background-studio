@@ -168,6 +168,7 @@ struct StudioApp {
     thumbnail_directory: PathBuf,
     tray: TrayUi,
     logo: Option<egui::TextureHandle>,
+    plugin_icons: HashMap<String, Option<egui::TextureHandle>>,
     proxy_draft: Option<ProxySettings>,
     host_draft: Option<(bool, bool)>,
     enabled_draft: HashMap<String, bool>,
@@ -238,6 +239,7 @@ impl StudioApp {
             thumbnail_directory: thumbnails::cache_directory(&data_dir),
             tray,
             logo: load_sidebar_logo(&creation.egui_ctx),
+            plugin_icons: HashMap::new(),
             proxy_draft: None,
             host_draft: None,
             enabled_draft: HashMap::new(),
@@ -564,6 +566,30 @@ impl StudioApp {
         }
     }
 
+    /// 按 icon_path 懒加载插件 logo 纹理；加载失败也缓存，避免每帧重试。
+    fn plugin_icon_texture(
+        &mut self,
+        context: &egui::Context,
+        plugin: &crate::plugins::PluginCard,
+    ) -> Option<egui::TextureHandle> {
+        let path = plugin.icon_path.as_deref()?;
+        if let Some(cached) = self.plugin_icons.get(path) {
+            return cached.clone();
+        }
+        let texture = image::open(path).ok().map(|source| {
+            let rgba = source.thumbnail(96, 96).into_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            let color = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+            context.load_texture(
+                format!("plugin-icon-{}", plugin.id),
+                color,
+                egui::TextureOptions::LINEAR,
+            )
+        });
+        self.plugin_icons.insert(path.to_string(), texture.clone());
+        texture
+    }
+
     fn render_takeover_bus(&mut self, ui: &mut egui::Ui, snapshot: &HostSnapshot) {
         Frame::new()
             .fill(PAPER)
@@ -586,6 +612,7 @@ impl StudioApp {
                     let node_width = ((available - 24.0 * (count - 1.0)) / count).max(120.0);
                     for (index, plugin) in snapshot.plugins.iter().enumerate() {
                         let color = phase_color(&plugin.phase, plugin.running);
+                        let icon = self.plugin_icon_texture(ui.ctx(), plugin);
                         let (rect, response) = ui
                             .allocate_exact_size(Vec2::new(node_width, 58.0), egui::Sense::click());
                         let fill = if self.selected_plugin.as_deref() == Some(plugin.id.as_str()) {
@@ -600,15 +627,28 @@ impl StudioApp {
                             Stroke::new(1.0, color.gamma_multiply(0.55)),
                             egui::StrokeKind::Inside,
                         );
-                        let center = rect.left_center() + egui::vec2(18.0, 0.0);
-                        ui.painter().circle_filled(center, 6.0, color);
-                        ui.painter().circle_stroke(
-                            center,
-                            10.0,
-                            Stroke::new(1.0, color.gamma_multiply(0.35)),
-                        );
+                        let text_x = if let Some(icon) = &icon {
+                            let icon_rect = egui::Rect::from_center_size(
+                                rect.left_center() + egui::vec2(22.0, 0.0),
+                                Vec2::splat(28.0),
+                            );
+                            paint_icon(ui, icon, icon_rect);
+                            let dot = icon_rect.right_bottom() + egui::vec2(-3.0, -3.0);
+                            ui.painter().circle_stroke(dot, 5.0, Stroke::new(2.0, fill));
+                            ui.painter().circle_filled(dot, 4.0, color);
+                            44.0
+                        } else {
+                            let center = rect.left_center() + egui::vec2(18.0, 0.0);
+                            ui.painter().circle_filled(center, 6.0, color);
+                            ui.painter().circle_stroke(
+                                center,
+                                10.0,
+                                Stroke::new(1.0, color.gamma_multiply(0.35)),
+                            );
+                            36.0
+                        };
                         ui.painter().text(
-                            rect.left_center() + egui::vec2(36.0, -10.0),
+                            rect.left_center() + egui::vec2(text_x, -10.0),
                             egui::Align2::LEFT_CENTER,
                             &plugin.display_name,
                             egui::FontId::proportional(13.0),
@@ -622,7 +662,7 @@ impl StudioApp {
                             "待安装"
                         };
                         ui.painter().text(
-                            rect.left_center() + egui::vec2(36.0, 10.0),
+                            rect.left_center() + egui::vec2(text_x, 10.0),
                             egui::Align2::LEFT_CENTER,
                             format!("{status} · {}", plugin_version_label(plugin)),
                             egui::FontId::proportional(10.0),
@@ -645,6 +685,7 @@ impl StudioApp {
     }
 
     fn render_plugin_card(&mut self, ui: &mut egui::Ui, plugin: crate::plugins::PluginCard) {
+        let icon = self.plugin_icon_texture(ui.ctx(), &plugin);
         Frame::new()
             .fill(PAPER)
             .stroke(Stroke::new(1.0, LINE))
@@ -654,15 +695,29 @@ impl StudioApp {
                 ui.horizontal(|ui| {
                     let color = phase_color(&plugin.phase, plugin.running);
                     let (rect, _) = ui.allocate_exact_size(Vec2::splat(46.0), egui::Sense::hover());
-                    ui.painter()
-                        .rect_filled(rect, 14.0, color.gamma_multiply(0.12));
-                    ui.painter().rect_stroke(
-                        rect,
-                        14.0,
-                        Stroke::new(1.0, color.gamma_multiply(0.35)),
-                        egui::StrokeKind::Inside,
-                    );
-                    ui.painter().circle_filled(rect.center(), 7.0, color);
+                    if let Some(icon) = &icon {
+                        paint_icon(ui, icon, rect);
+                        ui.painter().rect_stroke(
+                            rect,
+                            14.0,
+                            Stroke::new(1.0, color.gamma_multiply(0.35)),
+                            egui::StrokeKind::Inside,
+                        );
+                        let dot = rect.right_bottom() + egui::vec2(-4.0, -4.0);
+                        ui.painter()
+                            .circle_stroke(dot, 6.0, Stroke::new(2.0, PAPER));
+                        ui.painter().circle_filled(dot, 5.0, color);
+                    } else {
+                        ui.painter()
+                            .rect_filled(rect, 14.0, color.gamma_multiply(0.12));
+                        ui.painter().rect_stroke(
+                            rect,
+                            14.0,
+                            Stroke::new(1.0, color.gamma_multiply(0.35)),
+                            egui::StrokeKind::Inside,
+                        );
+                        ui.painter().circle_filled(rect.center(), 7.0, color);
+                    }
                     ui.add_space(14.0);
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
@@ -861,17 +916,37 @@ impl StudioApp {
         if detail.plugin.id != plugin_id {
             return;
         }
-        page_heading(
-            ui,
-            &detail.plugin.display_name,
-            &format!(
-                "{} · {} · 协议 {} · {}",
-                detail.plugin.target_hint,
-                plugin_version_label(&detail.plugin),
-                detail.plugin_protocol,
-                detail.plugin.status_message
-            ),
+        let icon = self.plugin_icon_texture(ui.ctx(), &detail.plugin);
+        let subtitle = format!(
+            "{} · {} · 协议 {} · {}",
+            detail.plugin.target_hint,
+            plugin_version_label(&detail.plugin),
+            detail.plugin_protocol,
+            detail.plugin.status_message
         );
+        if let Some(icon) = &icon {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Image::new(icon)
+                        .fit_to_exact_size(Vec2::splat(52.0))
+                        .corner_radius(14.0),
+                );
+                ui.add_space(12.0);
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(&detail.plugin.display_name)
+                            .size(30.0)
+                            .strong()
+                            .color(INK),
+                    );
+                    ui.add_space(2.0);
+                    ui.label(RichText::new(&subtitle).size(13.0).color(MUTED));
+                });
+            });
+            ui.add_space(20.0);
+        } else {
+            page_heading(ui, &detail.plugin.display_name, &subtitle);
+        }
         Frame::new()
             .fill(PAPER)
             .stroke(Stroke::new(1.0, LINE))
@@ -1698,6 +1773,19 @@ fn navigation_button(
         );
     }
     response
+}
+
+/// 直接用画笔按等比缩放绘制插件 logo；不用 ui.put，避免额外占用布局空间。
+fn paint_icon(ui: &egui::Ui, icon: &egui::TextureHandle, rect: egui::Rect) {
+    let size = icon.size_vec2();
+    let scale = (rect.width() / size.x).min(rect.height() / size.y);
+    let fitted = egui::Rect::from_center_size(rect.center(), size * scale);
+    ui.painter().image(
+        icon.id(),
+        fitted,
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
 }
 
 fn page_heading(ui: &mut egui::Ui, title: &str, subtitle: &str) {
