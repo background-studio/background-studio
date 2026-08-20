@@ -46,9 +46,24 @@ async fn request_windows(
 ) -> Result<Value, String> {
     use tokio::net::windows::named_pipe::ClientOptions;
 
-    let client = ClientOptions::new()
-        .open(pipe_name)
-        .map_err(|error| format!("无法连接插件管道（插件是否已启动？）：{error}"))?;
+    // 服务端 accept 与重建监听实例之间存在窗口期，期间连接会得到
+    // ERROR_PIPE_BUSY(231)，按官方推荐做短暂重试而不是直接失败。
+    const ERROR_PIPE_BUSY: i32 = 231;
+    let busy_deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    let client = loop {
+        match ClientOptions::new().open(pipe_name) {
+            Ok(client) => break client,
+            Err(error)
+                if error.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                    && std::time::Instant::now() < busy_deadline =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(error) => {
+                return Err(format!("无法连接插件管道（插件是否已启动？）：{error}"));
+            }
+        }
+    };
     let (reader, mut writer) = tokio::io::split(client);
     let id = Uuid::new_v4().to_string();
     let line = encode_request(&id, cmd, params)?;

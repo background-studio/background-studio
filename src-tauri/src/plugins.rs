@@ -594,6 +594,22 @@ impl PluginManager {
     }
 
     pub async fn wait_until_ready(&mut self, id: &str) -> Result<Value, String> {
+        match self.wait_until_ready_once(id).await {
+            Ok(status) => Ok(status),
+            // 进程还活着却一直不应答（典型如管道全忙 os error 231 的僵尸态）：
+            // 宿主只看进程存活永远不会重启它，这里强制重启一次自愈。
+            Err(error) if self.is_running(id) => {
+                eprintln!("插件 {id} 进程存活但无响应，强制重启：{error}");
+                self.start(id)?;
+                self.wait_until_ready_once(id).await.map_err(|retry_error| {
+                    format!("已自动重启无响应的插件，但仍未就绪：{retry_error}")
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn wait_until_ready_once(&mut self, id: &str) -> Result<Value, String> {
         let pipe = self.pipe_name(id)?;
         let deadline = Instant::now() + Duration::from_secs(8);
         let mut last_error = "插件尚未创建控制管道。".to_string();
