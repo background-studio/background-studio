@@ -56,16 +56,34 @@ pub struct PluginsState {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConsoleBackground {
+    /// 当前实际渲染的图片文件（轮播时由宿主定时更新）。
     pub path: Option<String>,
+    /// 绑定的共享媒体库条目；为空表示背景来自文件对话框选择的固定文件。
+    #[serde(default)]
+    pub media_id: Option<String>,
     /// 背景图可见强度，0.0-1.0。
     pub intensity: f32,
+    #[serde(default)]
+    pub slideshow: bool,
+    #[serde(default = "default_console_interval")]
+    pub interval_seconds: u64,
+    #[serde(default)]
+    pub order: crate::core::SlideshowOrder,
+}
+
+fn default_console_interval() -> u64 {
+    300
 }
 
 impl Default for ConsoleBackground {
     fn default() -> Self {
         Self {
             path: None,
+            media_id: None,
             intensity: 0.35,
+            slideshow: false,
+            interval_seconds: default_console_interval(),
+            order: crate::core::SlideshowOrder::default(),
         }
     }
 }
@@ -217,7 +235,11 @@ impl PluginManager {
     pub fn set_console_background(&mut self, background: ConsoleBackground) -> Result<(), String> {
         self.state.console_background = ConsoleBackground {
             path: background.path.filter(|path| !path.trim().is_empty()),
+            media_id: background.media_id.filter(|id| !id.trim().is_empty()),
             intensity: background.intensity.clamp(0.0, 1.0),
+            slideshow: background.slideshow,
+            interval_seconds: background.interval_seconds.clamp(10, 86_400),
+            order: background.order,
         };
         self.save()
     }

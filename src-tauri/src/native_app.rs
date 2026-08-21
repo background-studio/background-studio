@@ -20,8 +20,8 @@ use tray_icon::{
 use crate::{
     config,
     core::{
-        HostCore, PluginDetail, ProfilePatch, SharedMediaKind, SlideshowOrder, SlideshowPatch,
-        SlideshowSettings,
+        ConsoleMediaEntry, HostCore, PluginDetail, ProfilePatch, SharedMediaKind, SlideshowOrder,
+        SlideshowPatch, SlideshowSettings,
     },
     desktop,
     plugins::{ConsoleBackground, HostSnapshot, InstallProgress},
@@ -62,6 +62,8 @@ enum Command {
     UpdateHostSettings(bool, bool),
     UpdateProxy(ProxySettings),
     UpdateConsoleBackground(ConsoleBackground),
+    LoadConsoleMedia,
+    SetConsoleBackgroundFromMedia(String),
     RelocateDataDirectory(PathBuf),
     InstallHostUpdate,
 }
@@ -69,6 +71,7 @@ enum Command {
 enum UiEvent {
     Snapshot(HostSnapshot),
     Detail(String, PluginDetail),
+    ConsoleMedia(Vec<ConsoleMediaEntry>),
     Progress(InstallProgress),
     Thumbnail(ThumbnailPixels),
     ThumbnailFailed(String),
@@ -173,6 +176,8 @@ struct StudioApp {
     console_bg_texture: Option<(String, egui::TextureHandle)>,
     console_bg_draft: Option<ConsoleBackground>,
     console_bg_active: bool,
+    console_media: Option<Vec<ConsoleMediaEntry>>,
+    console_media_open: bool,
     proxy_draft: Option<ProxySettings>,
     host_draft: Option<(bool, bool)>,
     enabled_draft: HashMap<String, bool>,
@@ -247,6 +252,8 @@ impl StudioApp {
             console_bg_texture: None,
             console_bg_draft: None,
             console_bg_active: false,
+            console_media: None,
+            console_media_open: false,
             proxy_draft: None,
             host_draft: None,
             enabled_draft: HashMap::new(),
@@ -350,6 +357,7 @@ impl StudioApp {
                         self.detail = Some(detail);
                     }
                 }
+                UiEvent::ConsoleMedia(entries) => self.console_media = Some(entries),
                 UiEvent::Progress(progress) => self.progress = Some(progress),
                 UiEvent::Thumbnail(pixels) => {
                     self.thumbnail_loading.remove(&pixels.key);
@@ -640,6 +648,88 @@ impl StudioApp {
             Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
         );
         self.console_bg_active = true;
+    }
+
+    /// 弹窗：从共享媒体库挑一张图设为控制台背景。
+    fn render_console_media_picker(&mut self, context: &egui::Context) {
+        if !self.console_media_open {
+            return;
+        }
+        let mut open = true;
+        let entries = self.console_media.clone();
+        egui::Window::new("从媒体库选背景")
+            .open(&mut open)
+            .collapsible(false)
+            .default_size(Vec2::new(540.0, 420.0))
+            .show(context, |ui| {
+                ui.label(
+                    RichText::new("点击图片立即生效；文件夹条目每次点击随机换一张。")
+                        .size(11.0)
+                        .color(MUTED),
+                );
+                ui.add_space(8.0);
+                match entries {
+                    None => {
+                        ui.spinner();
+                    }
+                    Some(entries) if entries.is_empty() => {
+                        ui.label(
+                            RichText::new("共享媒体库还没有图片，先到任意插件详情页导入吧。")
+                                .color(MUTED),
+                        );
+                    }
+                    Some(entries) => {
+                        egui::ScrollArea::vertical().max_height(440.0).show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                for entry in &entries {
+                                    let response = Frame::new()
+                                        .fill(PAPER_RAISED)
+                                        .stroke(Stroke::new(1.0, LINE))
+                                        .corner_radius(10.0)
+                                        .inner_margin(8.0)
+                                        .show(ui, |ui| {
+                                            ui.set_width(102.0);
+                                            ui.vertical(|ui| {
+                                                self.render_thumbnail(
+                                                    ui,
+                                                    entry.thumbnail.as_ref(),
+                                                    &entry.name,
+                                                );
+                                                let label = if entry.is_folder {
+                                                    format!("{} · 随机", entry.name)
+                                                } else {
+                                                    entry.name.clone()
+                                                };
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(label)
+                                                            .size(10.0)
+                                                            .color(INK),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                            });
+                                        })
+                                        .response
+                                        .interact(egui::Sense::click());
+                                    if response.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    if response.clicked() {
+                                        self.console_bg_draft = None;
+                                        self.dispatch(Command::SetConsoleBackgroundFromMedia(
+                                            entry.media_id.clone(),
+                                        ));
+                                    }
+                                }
+                            });
+                        });
+                    }
+                }
+            });
+        if !open {
+            self.console_media_open = false;
+        }
     }
 
     fn rail_fill(&self) -> Color32 {
@@ -959,13 +1049,20 @@ impl StudioApp {
                             .pick_file()
                         {
                             background.path = Some(file.to_string_lossy().into_owned());
+                            background.media_id = None;
                             self.console_bg_draft = Some(background.clone());
                             self.dispatch(Command::UpdateConsoleBackground(background.clone()));
                         }
                     }
+                    if ui.button("从媒体库选").clicked() {
+                        self.console_media = None;
+                        self.console_media_open = true;
+                        self.dispatch(Command::LoadConsoleMedia);
+                    }
                     if background.path.is_some() {
                         if ui.button("清除").clicked() {
                             background.path = None;
+                            background.media_id = None;
                             self.console_bg_draft = Some(background.clone());
                             self.dispatch(Command::UpdateConsoleBackground(background.clone()));
                         }
@@ -1004,6 +1101,43 @@ impl StudioApp {
                         }
                         if slider.drag_stopped() {
                             self.dispatch(Command::UpdateConsoleBackground(background.clone()));
+                        }
+                    });
+                }
+                // 只有绑定媒体库条目时才能轮播；固定文件没有可轮播的来源。
+                if background.media_id.is_some() {
+                    ui.horizontal(|ui| {
+                        if ui.checkbox(&mut background.slideshow, "自动轮播").changed() {
+                            self.console_bg_draft = Some(background.clone());
+                            self.dispatch(Command::UpdateConsoleBackground(background.clone()));
+                        }
+                        if background.slideshow {
+                            ui.label(RichText::new("间隔(秒)").color(MUTED));
+                            let drag = ui.add(
+                                egui::DragValue::new(&mut background.interval_seconds)
+                                    .range(10..=86_400)
+                                    .speed(5),
+                            );
+                            if drag.changed() {
+                                self.console_bg_draft = Some(background.clone());
+                            }
+                            if drag.drag_stopped() || drag.lost_focus() {
+                                self.dispatch(Command::UpdateConsoleBackground(background.clone()));
+                            }
+                            for (order, label) in [
+                                (SlideshowOrder::Sequential, "顺序"),
+                                (SlideshowOrder::Random, "随机"),
+                            ] {
+                                if ui.selectable_label(background.order == order, label).clicked()
+                                    && background.order != order
+                                {
+                                    background.order = order;
+                                    self.console_bg_draft = Some(background.clone());
+                                    self.dispatch(Command::UpdateConsoleBackground(
+                                        background.clone(),
+                                    ));
+                                }
+                            }
                         }
                     });
                 }
@@ -1515,6 +1649,7 @@ impl eframe::App for StudioApp {
                     }
                 });
             });
+        self.render_console_media_picker(&context);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -1631,6 +1766,15 @@ async fn execute_command(
         }
         Command::UpdateProxy(proxy) => core.set_proxy(proxy)?,
         Command::UpdateConsoleBackground(background) => core.set_console_background(background)?,
+        Command::LoadConsoleMedia => {
+            let entries = core.console_media_entries();
+            let _ = tx.send(UiEvent::ConsoleMedia(entries));
+        }
+        Command::SetConsoleBackgroundFromMedia(media_id) => {
+            core.set_console_background_from_media(&media_id)?;
+            let snapshot = core.snapshot().await;
+            let _ = tx.send(UiEvent::Snapshot(snapshot));
+        }
         Command::RelocateDataDirectory(folder) => {
             core.relocate_data_directory(folder)?;
         }
@@ -1679,6 +1823,9 @@ fn start_snapshot_worker(
             {
                 let mut core = core.lock().await;
                 if let Err(error) = core.tick_slideshow().await {
+                    let _ = tx.send(UiEvent::Error(error));
+                }
+                if let Err(error) = core.tick_console_slideshow() {
                     let _ = tx.send(UiEvent::Error(error));
                 }
                 let snapshot = core.snapshot().await;

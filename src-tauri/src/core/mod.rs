@@ -54,6 +54,7 @@ pub struct HostCore {
     profiles: HashMap<String, PluginProfile>,
     hello: HashMap<String, HelloResult>,
     slideshow_ticks: HashMap<String, Instant>,
+    console_slideshow_tick: Option<Instant>,
     last_phase: HashMap<String, String>,
 }
 
@@ -79,6 +80,15 @@ pub struct ThumbnailSource {
     pub kind: MediaKind,
 }
 
+/// 供控制台背景选择器展示的共享媒体库图片条目。
+#[derive(Clone, Debug)]
+pub struct ConsoleMediaEntry {
+    pub media_id: String,
+    pub name: String,
+    pub is_folder: bool,
+    pub thumbnail: Option<ThumbnailSource>,
+}
+
 impl HostCore {
     pub fn load(data_dir: PathBuf) -> Result<Self, String> {
         let plugins = PluginManager::load(data_dir.clone())?;
@@ -96,6 +106,7 @@ impl HostCore {
             profiles: HashMap::new(),
             hello: HashMap::new(),
             slideshow_ticks: HashMap::new(),
+            console_slideshow_tick: None,
             last_phase: HashMap::new(),
         };
         core.load_profiles()?;
@@ -160,6 +171,130 @@ impl HostCore {
         &mut self,
         background: crate::plugins::ConsoleBackground,
     ) -> Result<(), String> {
+        self.plugins.set_console_background(background)
+    }
+
+    /// 共享媒体库里可用作控制台背景的图片条目（含缩略图来源）。
+    pub fn console_media_entries(&mut self) -> Vec<ConsoleMediaEntry> {
+        self.library
+            .items()
+            .into_iter()
+            .filter(|item| item.kind == MediaKind::Image)
+            .map(|item| {
+                let thumbnail = self
+                    .library
+                    .resolve_playback(&item, SlideshowOrder::Sequential, false)
+                    .ok()
+                    .map(|resolved| {
+                        let modified = std::fs::metadata(&resolved.path)
+                            .ok()
+                            .and_then(|meta| meta.modified().ok())
+                            .and_then(|modified| {
+                                modified.duration_since(std::time::UNIX_EPOCH).ok()
+                            })
+                            .map(|duration| duration.as_nanos())
+                            .unwrap_or_default();
+                        ThumbnailSource {
+                            media_id: item.id.clone(),
+                            path: resolved.path,
+                            cache_key: format!(
+                                "{}-{modified}-{}",
+                                resolved.sha256, resolved.byte_size
+                            ),
+                            kind: resolved.kind.clone(),
+                        }
+                    });
+                ConsoleMediaEntry {
+                    media_id: item.id.clone(),
+                    name: item.name.clone(),
+                    is_folder: item.origin == MediaOrigin::Folder,
+                    thumbnail,
+                }
+            })
+            .collect()
+    }
+
+    /// 把共享媒体库条目绑定为控制台背景；文件夹源每次点击随机抽一张，
+    /// 并记住 media_id 以便自动轮播继续换图。
+    pub fn set_console_background_from_media(&mut self, media_id: &str) -> Result<(), String> {
+        let item = self
+            .library
+            .get_by_id(media_id)
+            .ok_or_else(|| "媒体不存在或已被删除。".to_string())?;
+        if item.kind != MediaKind::Image {
+            return Err("控制台背景只支持图片。".to_string());
+        }
+        let resolved = self
+            .library
+            .resolve_playback(&item, SlideshowOrder::Random, true)?;
+        let mut background = self.plugins.state().console_background.clone();
+        background.path = Some(resolved.path.to_string_lossy().into_owned());
+        background.media_id = Some(item.id.clone());
+        self.console_slideshow_tick = Some(Instant::now());
+        self.plugins.set_console_background(background)
+    }
+
+    /// 控制台背景轮播：与插件轮播一样由宿主定时驱动。
+    /// 文件夹源推进游标换一张；单文件条目则在媒体库全部图片条目间切换。
+    pub fn tick_console_slideshow(&mut self) -> Result<(), String> {
+        let background = self.plugins.state().console_background.clone();
+        if !background.slideshow || background.media_id.is_none() {
+            self.console_slideshow_tick = None;
+            return Ok(());
+        }
+        let now = Instant::now();
+        let elapsed = self.console_slideshow_tick.get_or_insert(now).elapsed();
+        if elapsed.as_secs() < background.interval_seconds.max(10) {
+            return Ok(());
+        }
+        self.console_slideshow_tick = Some(now);
+        self.advance_console_background(background)
+    }
+
+    fn advance_console_background(
+        &mut self,
+        mut background: crate::plugins::ConsoleBackground,
+    ) -> Result<(), String> {
+        let media_id = background.media_id.clone().unwrap_or_default();
+        let Some(item) = self.library.get_by_id(&media_id) else {
+            return Ok(());
+        };
+        let next = if item.origin == MediaOrigin::Folder {
+            item
+        } else {
+            // 单文件条目：在媒体库全部图片条目里切下一个。
+            let images: Vec<MediaItem> = self
+                .library
+                .items()
+                .into_iter()
+                .filter(|candidate| candidate.kind == MediaKind::Image)
+                .collect();
+            if images.is_empty() {
+                return Ok(());
+            }
+            let current = images
+                .iter()
+                .position(|candidate| candidate.id == media_id)
+                .unwrap_or(0);
+            let index = match background.order {
+                SlideshowOrder::Sequential => (current + 1) % images.len(),
+                SlideshowOrder::Random => {
+                    let seed = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_nanos())
+                        .unwrap_or_default();
+                    let mut index = (seed % images.len() as u128) as usize;
+                    if images.len() > 1 && index == current {
+                        index = (index + 1) % images.len();
+                    }
+                    index
+                }
+            };
+            images[index].clone()
+        };
+        let resolved = self.library.resolve_playback(&next, background.order, true)?;
+        background.path = Some(resolved.path.to_string_lossy().into_owned());
+        background.media_id = Some(next.id);
         self.plugins.set_console_background(background)
     }
 
