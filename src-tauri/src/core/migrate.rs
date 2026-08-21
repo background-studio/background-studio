@@ -254,7 +254,7 @@ mod tests {
         assert_eq!(first.media_added, 1);
         assert_eq!(first.profiles_written, vec!["codex".to_string()]);
         assert_eq!(library.items().len(), 1);
-        let profile = crate::core::profile::load_profile(&host, "codex").unwrap();
+        let profile = crate::core::profile::load_profile(&host, "codex", None).unwrap();
         assert_eq!(
             profile.active_media_id.as_deref(),
             Some("aaaa1111-2222-3333-4444-555555555555")
@@ -322,7 +322,7 @@ mod tests {
         let report =
             migrate_standalone(&host, &mut library, &[("notion".to_string(), legacy)]).unwrap();
         assert_eq!(report.media_added, 0);
-        let profile = crate::core::profile::load_profile(&host, "notion").unwrap();
+        let profile = crate::core::profile::load_profile(&host, "notion", None).unwrap();
         assert_eq!(
             profile.active_media_id.as_deref(),
             Some(existing_id.as_str())

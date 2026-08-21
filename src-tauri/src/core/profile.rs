@@ -130,16 +130,22 @@ pub fn profile_path(data_dir: &Path, plugin_id: &str) -> std::path::PathBuf {
     data_dir.join("profiles").join(format!("{plugin_id}.json"))
 }
 
-pub fn load_profile(data_dir: &Path, plugin_id: &str) -> Result<PluginProfile, String> {
+pub fn load_profile(
+    data_dir: &Path,
+    plugin_id: &str,
+    schema: Option<&Value>,
+) -> Result<PluginProfile, String> {
     let path = profile_path(data_dir, plugin_id);
     if !path.exists() {
-        let profile = PluginProfile::default();
+        let mut profile = PluginProfile::default();
+        // 让新档案的 display 直接落到该档案 schema 的默认值上。
+        profile.display = sanitize_display(&profile.display, schema);
         write_json_transaction(&path, &profile)?;
         return Ok(profile);
     }
     let raw = fs::read_to_string(&path).map_err(|error| error.to_string())?;
     let value: Value = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
-    Ok(normalize_profile(&value))
+    Ok(normalize_profile_with_schema(&value, schema))
 }
 
 pub fn save_profile(
@@ -151,6 +157,12 @@ pub fn save_profile(
 }
 
 pub fn normalize_profile(value: &Value) -> PluginProfile {
+    normalize_profile_with_schema(value, None)
+}
+
+/// 按指定 schema 归一化档案；schema 为 None 时用插件默认 schema。
+/// console 等自带 schema 的档案必须传入自己的 schema，否则专属字段会被洗掉。
+pub fn normalize_profile_with_schema(value: &Value, schema: Option<&Value>) -> PluginProfile {
     let defaults = PluginProfile::default();
     let active_media_id = value
         .get("activeMediaId")
@@ -183,7 +195,7 @@ pub fn normalize_profile(value: &Value) -> PluginProfile {
         schema_version: 1,
         active_media_id,
         playlist_ids,
-        display: sanitize_display(value.get("display").unwrap_or(&Value::Null), None),
+        display: sanitize_display(value.get("display").unwrap_or(&Value::Null), schema),
         slideshow: SlideshowSettings {
             enabled: slideshow
                 .get("enabled")
@@ -383,7 +395,7 @@ mod tests {
 
         let root = std::env::temp_dir().join(format!("host-profile-{}", Uuid::new_v4()));
         save_profile(&root, "codex", &profile).unwrap();
-        let loaded = load_profile(&root, "codex").unwrap();
+        let loaded = load_profile(&root, "codex", None).unwrap();
         assert_eq!(loaded.active_media_id, profile.active_media_id);
         assert_eq!(loaded.display["opacity"], 1.0);
         let _ = fs::remove_dir_all(root);

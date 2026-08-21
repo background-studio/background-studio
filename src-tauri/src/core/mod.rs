@@ -40,6 +40,27 @@ use self::{
 
 const DEFAULT_WORKER_MAX_MEDIA_BYTES: u64 = 64 * 1024 * 1024;
 
+/// 控制台（壳自身）背景的虚拟档案 id：与插件共用媒体库、profile 与轮播管线，
+/// 只是没有对应的 worker 进程。
+pub const CONSOLE_PROFILE_ID: &str = "console";
+
+/// 控制台背景的显示设置 schema：只有背景强度一项。
+fn console_settings_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "intensity": {
+                "type": "number",
+                "title": "背景强度",
+                "minimum": 0,
+                "maximum": 1,
+                "step": 0.01,
+                "default": 0.35
+            }
+        }
+    })
+}
+
 pub use self::{
     ipc::{request, request_with_params},
     manifest::{load_from_install_dir, PluginManifest as ParsedManifest},
@@ -54,7 +75,8 @@ pub struct HostCore {
     profiles: HashMap<String, PluginProfile>,
     hello: HashMap<String, HelloResult>,
     slideshow_ticks: HashMap<String, Instant>,
-    console_slideshow_tick: Option<Instant>,
+    /// 控制台背景当前解析出的图片文件（事件驱动更新，避免快照循环反复解析）。
+    console_background_path: Option<PathBuf>,
     last_phase: HashMap<String, String>,
 }
 
@@ -80,15 +102,6 @@ pub struct ThumbnailSource {
     pub kind: MediaKind,
 }
 
-/// 供控制台背景选择器展示的共享媒体库图片条目。
-#[derive(Clone, Debug)]
-pub struct ConsoleMediaEntry {
-    pub media_id: String,
-    pub name: String,
-    pub is_folder: bool,
-    pub thumbnail: Option<ThumbnailSource>,
-}
-
 impl HostCore {
     pub fn load(data_dir: PathBuf) -> Result<Self, String> {
         let plugins = PluginManager::load(data_dir.clone())?;
@@ -106,26 +119,29 @@ impl HostCore {
             profiles: HashMap::new(),
             hello: HashMap::new(),
             slideshow_ticks: HashMap::new(),
-            console_slideshow_tick: None,
+            console_background_path: None,
             last_phase: HashMap::new(),
         };
         core.load_profiles()?;
         core.sync_media_server();
+        core.refresh_console_background();
         Ok(core)
     }
 
     fn load_profiles(&mut self) -> Result<(), String> {
-        let ids: Vec<String> = self
+        let mut ids: Vec<String> = self
             .plugins
             .state()
             .plugins
             .iter()
             .map(|plugin| plugin.id.clone())
             .collect();
+        ids.push(CONSOLE_PROFILE_ID.to_string());
         for id in ids {
-            let profile = load_profile(self.plugins.data_dir(), &id)?;
+            let schema = self.settings_schema(&id);
+            let profile = load_profile(self.plugins.data_dir(), &id, Some(&schema))?;
             self.profiles.insert(id.clone(), profile);
-            if self.plugins.installed_manifest(&id).is_some() {
+            if id == CONSOLE_PROFILE_ID || self.plugins.installed_manifest(&id).is_some() {
                 self.normalize_profile_for_plugin(&id)?;
             }
         }
@@ -167,135 +183,41 @@ impl HostCore {
         self.plugins.set_autostart(enabled, start_minimized)
     }
 
-    pub fn set_console_background(
-        &mut self,
-        background: crate::plugins::ConsoleBackground,
-    ) -> Result<(), String> {
-        self.plugins.set_console_background(background)
-    }
-
-    /// 共享媒体库里可用作控制台背景的图片条目（含缩略图来源）。
-    pub fn console_media_entries(&mut self) -> Vec<ConsoleMediaEntry> {
-        self.library
-            .items()
-            .into_iter()
+    /// 重新解析 console 档案当前选中的媒体，更新控制台背景文件缓存。
+    /// 在档案变更、媒体删除或轮播推进后调用；快照循环只读缓存。
+    fn refresh_console_background(&mut self) {
+        let Some(profile) = self.profiles.get(CONSOLE_PROFILE_ID).cloned() else {
+            self.console_background_path = None;
+            return;
+        };
+        self.console_background_path = profile
+            .active_media_id
+            .as_deref()
+            .and_then(|media_id| self.library.get_by_id(media_id))
             .filter(|item| item.kind == MediaKind::Image)
-            .map(|item| {
-                let thumbnail = self
-                    .library
-                    .resolve_playback(&item, SlideshowOrder::Sequential, false)
+            .and_then(|item| {
+                self.library
+                    .resolve_playback(&item, profile.slideshow.order, false)
                     .ok()
-                    .map(|resolved| {
-                        let modified = std::fs::metadata(&resolved.path)
-                            .ok()
-                            .and_then(|meta| meta.modified().ok())
-                            .and_then(|modified| {
-                                modified.duration_since(std::time::UNIX_EPOCH).ok()
-                            })
-                            .map(|duration| duration.as_nanos())
-                            .unwrap_or_default();
-                        ThumbnailSource {
-                            media_id: item.id.clone(),
-                            path: resolved.path,
-                            cache_key: format!(
-                                "{}-{modified}-{}",
-                                resolved.sha256, resolved.byte_size
-                            ),
-                            kind: resolved.kind.clone(),
-                        }
-                    });
-                ConsoleMediaEntry {
-                    media_id: item.id.clone(),
-                    name: item.name.clone(),
-                    is_folder: item.origin == MediaOrigin::Folder,
-                    thumbnail,
-                }
             })
-            .collect()
+            .map(|resolved| resolved.path);
     }
 
-    /// 把共享媒体库条目绑定为控制台背景；文件夹源每次点击随机抽一张，
-    /// 并记住 media_id 以便自动轮播继续换图。
-    pub fn set_console_background_from_media(&mut self, media_id: &str) -> Result<(), String> {
-        let item = self
-            .library
-            .get_by_id(media_id)
-            .ok_or_else(|| "媒体不存在或已被删除。".to_string())?;
-        if item.kind != MediaKind::Image {
-            return Err("控制台背景只支持图片。".to_string());
+    /// 控制台背景的快照视图：当前解析出的文件 + 档案里的强度。
+    fn console_background_view(&self) -> crate::plugins::ConsoleBackground {
+        let intensity = self
+            .profiles
+            .get(CONSOLE_PROFILE_ID)
+            .and_then(|profile| profile.display.get("intensity"))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.35) as f32;
+        crate::plugins::ConsoleBackground {
+            path: self
+                .console_background_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            intensity,
         }
-        let resolved = self
-            .library
-            .resolve_playback(&item, SlideshowOrder::Random, true)?;
-        let mut background = self.plugins.state().console_background.clone();
-        background.path = Some(resolved.path.to_string_lossy().into_owned());
-        background.media_id = Some(item.id.clone());
-        self.console_slideshow_tick = Some(Instant::now());
-        self.plugins.set_console_background(background)
-    }
-
-    /// 控制台背景轮播：与插件轮播一样由宿主定时驱动。
-    /// 文件夹源推进游标换一张；单文件条目则在媒体库全部图片条目间切换。
-    pub fn tick_console_slideshow(&mut self) -> Result<(), String> {
-        let background = self.plugins.state().console_background.clone();
-        if !background.slideshow || background.media_id.is_none() {
-            self.console_slideshow_tick = None;
-            return Ok(());
-        }
-        let now = Instant::now();
-        let elapsed = self.console_slideshow_tick.get_or_insert(now).elapsed();
-        if elapsed.as_secs() < background.interval_seconds.max(10) {
-            return Ok(());
-        }
-        self.console_slideshow_tick = Some(now);
-        self.advance_console_background(background)
-    }
-
-    fn advance_console_background(
-        &mut self,
-        mut background: crate::plugins::ConsoleBackground,
-    ) -> Result<(), String> {
-        let media_id = background.media_id.clone().unwrap_or_default();
-        let Some(item) = self.library.get_by_id(&media_id) else {
-            return Ok(());
-        };
-        let next = if item.origin == MediaOrigin::Folder {
-            item
-        } else {
-            // 单文件条目：在媒体库全部图片条目里切下一个。
-            let images: Vec<MediaItem> = self
-                .library
-                .items()
-                .into_iter()
-                .filter(|candidate| candidate.kind == MediaKind::Image)
-                .collect();
-            if images.is_empty() {
-                return Ok(());
-            }
-            let current = images
-                .iter()
-                .position(|candidate| candidate.id == media_id)
-                .unwrap_or(0);
-            let index = match background.order {
-                SlideshowOrder::Sequential => (current + 1) % images.len(),
-                SlideshowOrder::Random => {
-                    let seed = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|duration| duration.as_nanos())
-                        .unwrap_or_default();
-                    let mut index = (seed % images.len() as u128) as usize;
-                    if images.len() > 1 && index == current {
-                        index = (index + 1) % images.len();
-                    }
-                    index
-                }
-            };
-            images[index].clone()
-        };
-        let resolved = self.library.resolve_playback(&next, background.order, true)?;
-        background.path = Some(resolved.path.to_string_lossy().into_owned());
-        background.media_id = Some(next.id);
-        self.plugins.set_console_background(background)
     }
 
     pub fn set_proxy(&mut self, proxy: ProxySettings) -> Result<(), String> {
@@ -485,6 +407,9 @@ impl HostCore {
     }
 
     fn settings_schema(&self, id: &str) -> Value {
+        if id == CONSOLE_PROFILE_ID {
+            return console_settings_schema();
+        }
         self.plugins
             .installed_manifest(id)
             .map(|manifest| manifest.settings_schema)
@@ -558,18 +483,50 @@ impl HostCore {
             card.plugin_protocol = protocol;
             self.last_phase.insert(card.id.clone(), card.phase.clone());
         }
+        snapshot.console_background = self.console_background_view();
         snapshot
     }
 
+    /// 控制台背景在详情页里复用插件的媒体库/设置面板，需要一张伪插件卡片。
+    fn console_card(&self) -> PluginCard {
+        let profile = self.profiles.get(CONSOLE_PROFILE_ID);
+        let status_message = match self.console_background_path {
+            Some(_) => "背景已应用到控制台".to_string(),
+            None => "还没有选择背景".to_string(),
+        };
+        PluginCard {
+            id: CONSOLE_PROFILE_ID.to_string(),
+            display_name: "控制台背景".to_string(),
+            target_hint: "Background Studio 壳".to_string(),
+            enabled: true,
+            installed_version: None,
+            latest_version: None,
+            latest_asset_name: None,
+            running: profile.is_some_and(|profile| profile.active_media_id.is_some()),
+            status_message,
+            phase: "active".to_string(),
+            plugin_protocol: 0,
+            update_available: false,
+            icon_path: None,
+            icon_web: String::new(),
+            capabilities: Vec::new(),
+        }
+    }
+
     pub async fn plugin_detail(&mut self, id: &str) -> Result<PluginDetail, String> {
-        let snapshot = self.snapshot().await;
-        let plugin = snapshot
-            .plugins
-            .into_iter()
-            .find(|plugin| plugin.id == id)
-            .ok_or_else(|| format!("未知插件：{id}"))?;
+        let plugin = if id == CONSOLE_PROFILE_ID {
+            self.console_card()
+        } else {
+            let snapshot = self.snapshot().await;
+            snapshot
+                .plugins
+                .into_iter()
+                .find(|plugin| plugin.id == id)
+                .ok_or_else(|| format!("未知插件：{id}"))?
+        };
         if !self.profiles.contains_key(id) {
-            let profile = load_profile(self.plugins.data_dir(), id)?;
+            let schema = self.settings_schema(id);
+            let profile = load_profile(self.plugins.data_dir(), id, Some(&schema))?;
             self.profiles.insert(id.to_string(), profile);
         }
         let mut profile = self
@@ -673,6 +630,7 @@ impl HostCore {
             }
             self.reconfigure_running(id).await?;
         }
+        self.refresh_console_background();
         self.plugin_detail(plugin_id).await
     }
 
@@ -693,6 +651,7 @@ impl HostCore {
         profile.active_media_id = media_id;
         save_profile(self.plugins.data_dir(), plugin_id, profile)?;
         self.reconfigure_running(plugin_id).await?;
+        self.refresh_console_background();
         self.plugin_detail(plugin_id).await
     }
 
@@ -728,6 +687,7 @@ impl HostCore {
                 .or_insert_with(Instant::now);
         }
         self.reconfigure_running(plugin_id).await?;
+        self.refresh_console_background();
         self.plugin_detail(plugin_id).await
     }
 
@@ -760,6 +720,7 @@ impl HostCore {
             _ => return Err("只有文件夹源或随机 API 可以刷新。".to_string()),
         }
         self.reconfigure_running(plugin_id).await?;
+        self.refresh_console_background();
         self.plugin_detail(plugin_id).await
     }
 
@@ -821,10 +782,40 @@ impl HostCore {
                 }
             }
         }
+        // 控制台背景走同一套轮播档案，只是换图后更新的是壳自身而非 worker。
+        if let Err(error) = self.tick_console_slideshow(now) {
+            first_error.get_or_insert(error);
+        }
         match first_error {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+
+    fn tick_console_slideshow(&mut self, now: Instant) -> Result<(), String> {
+        let Some(profile) = self.profiles.get(CONSOLE_PROFILE_ID) else {
+            return Ok(());
+        };
+        if !profile.slideshow.enabled {
+            self.slideshow_ticks.remove(CONSOLE_PROFILE_ID);
+            return Ok(());
+        }
+        let interval = profile.slideshow.interval_seconds;
+        let elapsed = self
+            .slideshow_ticks
+            .entry(CONSOLE_PROFILE_ID.to_string())
+            .or_insert(now)
+            .elapsed()
+            .as_secs();
+        if elapsed < interval {
+            return Ok(());
+        }
+        self.slideshow_ticks
+            .insert(CONSOLE_PROFILE_ID.to_string(), now);
+        if self.advance_slideshow(CONSOLE_PROFILE_ID)? {
+            self.refresh_console_background();
+        }
+        Ok(())
     }
 
     fn advance_slideshow(&mut self, id: &str) -> Result<bool, String> {
