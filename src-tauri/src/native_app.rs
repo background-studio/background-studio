@@ -24,7 +24,7 @@ use crate::{
         SlideshowSettings,
     },
     desktop,
-    plugins::{HostSnapshot, InstallProgress},
+    plugins::{ConsoleBackground, HostSnapshot, InstallProgress},
     proxy::{ProxyMode, ProxySettings},
     single_instance::{self, Instance, PrimaryInstance},
     thumbnails::{self, ThumbnailPixels, TEXTURE_CACHE_BYTES},
@@ -61,6 +61,7 @@ enum Command {
     RefreshMedia(String, String),
     UpdateHostSettings(bool, bool),
     UpdateProxy(ProxySettings),
+    UpdateConsoleBackground(ConsoleBackground),
     RelocateDataDirectory(PathBuf),
     InstallHostUpdate,
 }
@@ -169,6 +170,9 @@ struct StudioApp {
     tray: TrayUi,
     logo: Option<egui::TextureHandle>,
     plugin_icons: HashMap<String, Option<egui::TextureHandle>>,
+    console_bg_texture: Option<(String, egui::TextureHandle)>,
+    console_bg_draft: Option<ConsoleBackground>,
+    console_bg_active: bool,
     proxy_draft: Option<ProxySettings>,
     host_draft: Option<(bool, bool)>,
     enabled_draft: HashMap<String, bool>,
@@ -240,6 +244,9 @@ impl StudioApp {
             tray,
             logo: load_sidebar_logo(&creation.egui_ctx),
             plugin_icons: HashMap::new(),
+            console_bg_texture: None,
+            console_bg_draft: None,
+            console_bg_active: false,
             proxy_draft: None,
             host_draft: None,
             enabled_draft: HashMap::new(),
@@ -306,6 +313,9 @@ impl StudioApp {
                         == Some((snapshot.auto_start_with_windows, snapshot.start_minimized))
                     {
                         self.host_draft = None;
+                    }
+                    if self.console_bg_draft.as_ref() == Some(&snapshot.console_background) {
+                        self.console_bg_draft = None;
                     }
                     self.enabled_draft.retain(|id, enabled| {
                         snapshot
@@ -440,7 +450,7 @@ impl StudioApp {
             .exact_size(272.0)
             .frame(
                 Frame::new()
-                    .fill(RAIL)
+                    .fill(self.rail_fill())
                     .stroke(Stroke::new(1.0, LINE))
                     .inner_margin(egui::Margin::symmetric(18, 22)),
             )
@@ -524,6 +534,7 @@ impl StudioApp {
             }
             self.render_takeover_bus(ui, &snapshot);
             ui.add_space(16.0);
+            let metric_fill = self.paper_fill();
             ui.horizontal_wrapped(|ui| {
                 metric(
                     ui,
@@ -533,6 +544,7 @@ impl StudioApp {
                         .iter()
                         .filter(|plugin| plugin.installed_version.is_some())
                         .count(),
+                    metric_fill,
                 );
                 metric(
                     ui,
@@ -542,6 +554,7 @@ impl StudioApp {
                         .iter()
                         .filter(|plugin| plugin.running)
                         .count(),
+                    metric_fill,
                 );
                 metric(
                     ui,
@@ -551,6 +564,7 @@ impl StudioApp {
                         .iter()
                         .filter(|plugin| plugin.update_available)
                         .count(),
+                    metric_fill,
                 );
             });
             ui.add_space(18.0);
@@ -563,6 +577,92 @@ impl StudioApp {
         } else {
             ui.spinner();
             ui.label(RichText::new("正在加载宿主状态…").color(MUTED));
+        }
+    }
+
+    /// 当前生效的控制台背景设置（草稿优先，便于滑杆实时预览）。
+    fn console_background_settings(&self) -> Option<ConsoleBackground> {
+        self.console_bg_draft
+            .clone()
+            .or_else(|| self.snapshot.as_ref().map(|s| s.console_background.clone()))
+    }
+
+    /// 在所有面板之前把背景图铺满窗口；面板改用半透明填充让它透出来。
+    fn paint_console_background(&mut self, ui: &egui::Ui) {
+        self.console_bg_active = false;
+        let Some(settings) = self.console_background_settings() else {
+            return;
+        };
+        let Some(path) = settings.path.filter(|path| !path.is_empty()) else {
+            self.console_bg_texture = None;
+            return;
+        };
+        let stale = self
+            .console_bg_texture
+            .as_ref()
+            .is_none_or(|(cached, _)| cached != &path);
+        if stale {
+            let texture = image::open(&path).ok().map(|source| {
+                let rgba = source.thumbnail(2048, 2048).into_rgba8();
+                let size = [rgba.width() as usize, rgba.height() as usize];
+                let color = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                ui.ctx()
+                    .load_texture("console-background", color, egui::TextureOptions::LINEAR)
+            });
+            match texture {
+                Some(texture) => self.console_bg_texture = Some((path, texture)),
+                None => {
+                    self.console_bg_texture = None;
+                    return;
+                }
+            }
+        }
+        let Some((_, texture)) = &self.console_bg_texture else {
+            return;
+        };
+        let alpha = (settings.intensity.clamp(0.0, 1.0) * 255.0).round() as u8;
+        if alpha == 0 {
+            return;
+        }
+        // 此时面板尚未布局，根 ui 的范围即整个窗口。
+        let screen = ui.max_rect();
+        let size = texture.size_vec2();
+        if size.x <= 0.0 || size.y <= 0.0 {
+            return;
+        }
+        // cover 填充：等比放大到盖满整个窗口。
+        let scale = (screen.width() / size.x).max(screen.height() / size.y);
+        let rect = egui::Rect::from_center_size(screen.center(), size * scale);
+        ui.painter().image(
+            texture.id(),
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
+        );
+        self.console_bg_active = true;
+    }
+
+    fn rail_fill(&self) -> Color32 {
+        if self.console_bg_active {
+            glass(RAIL, 216)
+        } else {
+            RAIL
+        }
+    }
+
+    fn canvas_fill(&self) -> Color32 {
+        if self.console_bg_active {
+            glass(CANVAS, 176)
+        } else {
+            CANVAS
+        }
+    }
+
+    fn paper_fill(&self) -> Color32 {
+        if self.console_bg_active {
+            glass(PAPER, 212)
+        } else {
+            PAPER
         }
     }
 
@@ -592,7 +692,7 @@ impl StudioApp {
 
     fn render_takeover_bus(&mut self, ui: &mut egui::Ui, snapshot: &HostSnapshot) {
         Frame::new()
-            .fill(PAPER)
+            .fill(self.paper_fill())
             .stroke(Stroke::new(1.0, LINE))
             .corner_radius(16.0)
             .inner_margin(egui::Margin::symmetric(20, 16))
@@ -687,7 +787,7 @@ impl StudioApp {
     fn render_plugin_card(&mut self, ui: &mut egui::Ui, plugin: crate::plugins::PluginCard) {
         let icon = self.plugin_icon_texture(ui.ctx(), &plugin);
         Frame::new()
-            .fill(PAPER)
+            .fill(self.paper_fill())
             .stroke(Stroke::new(1.0, LINE))
             .corner_radius(16.0)
             .inner_margin(egui::Margin::symmetric(20, 16))
@@ -797,7 +897,7 @@ impl StudioApp {
             return;
         };
         Frame::new()
-            .fill(PAPER)
+            .fill(self.paper_fill())
             .stroke(Stroke::new(1.0, LINE))
             .corner_radius(16.0)
             .inner_margin(egui::Margin::symmetric(20, 16))
@@ -845,6 +945,67 @@ impl StudioApp {
                 if auto_changed || minimized_changed {
                     self.host_draft = Some((auto_start, minimized));
                     self.dispatch(Command::UpdateHostSettings(auto_start, minimized));
+                }
+                ui.separator();
+                let mut background = self
+                    .console_bg_draft
+                    .clone()
+                    .unwrap_or_else(|| snapshot.console_background.clone());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("控制台背景").color(MUTED));
+                    if ui.button("选择图片").clicked() {
+                        if let Some(file) = rfd::FileDialog::new()
+                            .add_filter("图片", &["png", "jpg", "jpeg", "webp", "gif", "avif"])
+                            .pick_file()
+                        {
+                            background.path = Some(file.to_string_lossy().into_owned());
+                            self.console_bg_draft = Some(background.clone());
+                            self.dispatch(Command::UpdateConsoleBackground(background.clone()));
+                        }
+                    }
+                    if background.path.is_some() {
+                        if ui.button("清除").clicked() {
+                            background.path = None;
+                            self.console_bg_draft = Some(background.clone());
+                            self.dispatch(Command::UpdateConsoleBackground(background.clone()));
+                        }
+                        let name = background
+                            .path
+                            .as_deref()
+                            .map(|path| {
+                                std::path::Path::new(path)
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| path.to_string())
+                            })
+                            .unwrap_or_default();
+                        ui.add(
+                            egui::Label::new(RichText::new(name).size(11.0).color(INK)).truncate(),
+                        );
+                    } else {
+                        ui.label(RichText::new("未设置").size(11.0).color(MUTED));
+                    }
+                });
+                if background.path.is_some() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("背景强度").color(MUTED));
+                        let slider = ui.add(
+                            egui::Slider::new(&mut background.intensity, 0.0..=1.0)
+                                .show_value(false),
+                        );
+                        ui.label(
+                            RichText::new(format!("{:.0}%", background.intensity * 100.0))
+                                .size(11.0)
+                                .color(MUTED),
+                        );
+                        if slider.changed() {
+                            // 拖动过程中只改草稿实时预览，松手才落盘。
+                            self.console_bg_draft = Some(background.clone());
+                        }
+                        if slider.drag_stopped() {
+                            self.dispatch(Command::UpdateConsoleBackground(background.clone()));
+                        }
+                    });
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -948,7 +1109,7 @@ impl StudioApp {
             page_heading(ui, &detail.plugin.display_name, &subtitle);
         }
         Frame::new()
-            .fill(PAPER)
+            .fill(self.paper_fill())
             .stroke(Stroke::new(1.0, LINE))
             .corner_radius(16.0)
             .inner_margin(egui::Margin::symmetric(18, 14))
@@ -1013,7 +1174,7 @@ impl StudioApp {
 
     fn render_media_library(&mut self, ui: &mut egui::Ui, plugin_id: &str, detail: &PluginDetail) {
         Frame::new()
-            .fill(PAPER)
+            .fill(self.paper_fill())
             .stroke(Stroke::new(1.0, LINE))
             .corner_radius(16.0)
             .inner_margin(egui::Margin::symmetric(18, 16))
@@ -1198,7 +1359,7 @@ impl StudioApp {
         detail: &PluginDetail,
     ) {
         Frame::new()
-            .fill(PAPER)
+            .fill(self.paper_fill())
             .stroke(Stroke::new(1.0, LINE))
             .corner_radius(16.0)
             .inner_margin(egui::Margin::symmetric(18, 16))
@@ -1323,11 +1484,12 @@ impl eframe::App for StudioApp {
         }
         self.drain_events(&context);
         context.request_repaint_after(Duration::from_millis(500));
+        self.paint_console_background(ui);
         self.render_sidebar(ui);
         egui::CentralPanel::default()
             .frame(
                 Frame::new()
-                    .fill(CANVAS)
+                    .fill(self.canvas_fill())
                     .inner_margin(egui::Margin::symmetric(28, 24)),
             )
             .show(ui, |ui| {
@@ -1468,6 +1630,7 @@ async fn execute_command(
             desktop::sync_autostart(auto_start, minimized)?;
         }
         Command::UpdateProxy(proxy) => core.set_proxy(proxy)?,
+        Command::UpdateConsoleBackground(background) => core.set_console_background(background)?,
         Command::RelocateDataDirectory(folder) => {
             core.relocate_data_directory(folder)?;
         }
@@ -1775,6 +1938,11 @@ fn navigation_button(
     response
 }
 
+/// 给基色附加透明度，让控制台背景图能透出来。
+fn glass(color: Color32, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
+}
+
 /// 直接用画笔按等比缩放绘制插件 logo；不用 ui.put，避免额外占用布局空间。
 fn paint_icon(ui: &egui::Ui, icon: &egui::TextureHandle, rect: egui::Rect) {
     let size = icon.size_vec2();
@@ -1806,9 +1974,9 @@ fn notice_frame(ui: &mut egui::Ui, message: &str, color: Color32) {
         });
 }
 
-fn metric(ui: &mut egui::Ui, label: &str, value: usize) {
+fn metric(ui: &mut egui::Ui, label: &str, value: usize, fill: Color32) {
     Frame::new()
-        .fill(PAPER)
+        .fill(fill)
         .stroke(Stroke::new(1.0, LINE))
         .corner_radius(14.0)
         .inner_margin(16.0)

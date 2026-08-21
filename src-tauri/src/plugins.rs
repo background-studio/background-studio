@@ -48,6 +48,26 @@ pub struct PluginsState {
     pub start_minimized: bool,
     #[serde(default)]
     pub proxy: ProxySettings,
+    #[serde(default)]
+    pub console_background: ConsoleBackground,
+}
+
+/// 控制台（壳自身）的背景图设置。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleBackground {
+    pub path: Option<String>,
+    /// 背景图可见强度，0.0-1.0。
+    pub intensity: f32,
+}
+
+impl Default for ConsoleBackground {
+    fn default() -> Self {
+        Self {
+            path: None,
+            intensity: 0.35,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -85,6 +105,7 @@ pub struct HostSnapshot {
     pub host_release_url: Option<String>,
     pub proxy_mode: ProxyMode,
     pub proxy_url: String,
+    pub console_background: ConsoleBackground,
 }
 
 pub struct PluginManager {
@@ -124,6 +145,7 @@ impl PluginManager {
                 auto_start_with_windows: false,
                 start_minimized: true,
                 proxy: ProxySettings::default(),
+                console_background: ConsoleBackground::default(),
             }
         };
         for plugin in &catalog {
@@ -190,6 +212,14 @@ impl PluginManager {
 
     pub fn proxy_settings(&self) -> ProxySettings {
         self.state.proxy.clone()
+    }
+
+    pub fn set_console_background(&mut self, background: ConsoleBackground) -> Result<(), String> {
+        self.state.console_background = ConsoleBackground {
+            path: background.path.filter(|path| !path.trim().is_empty()),
+            intensity: background.intensity.clamp(0.0, 1.0),
+        };
+        self.save()
     }
 
     pub fn set_proxy(&mut self, proxy: ProxySettings) -> Result<(), String> {
@@ -774,6 +804,7 @@ impl PluginManager {
             host_release_url: self.host_release.release_url.clone(),
             proxy_mode: self.state.proxy.mode.clone(),
             proxy_url: self.state.proxy.url.clone(),
+            console_background: self.state.console_background.clone(),
         }
     }
 }

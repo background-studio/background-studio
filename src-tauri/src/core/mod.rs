@@ -156,6 +156,13 @@ impl HostCore {
         self.plugins.set_autostart(enabled, start_minimized)
     }
 
+    pub fn set_console_background(
+        &mut self,
+        background: crate::plugins::ConsoleBackground,
+    ) -> Result<(), String> {
+        self.plugins.set_console_background(background)
+    }
+
     pub fn set_proxy(&mut self, proxy: ProxySettings) -> Result<(), String> {
         self.plugins.set_proxy(proxy)
     }
