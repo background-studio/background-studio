@@ -212,7 +212,6 @@ impl PluginManager {
         self.state.proxy.clone()
     }
 
-
     pub fn set_proxy(&mut self, proxy: ProxySettings) -> Result<(), String> {
         let proxy = proxy.normalized();
         // 允许先切到自定义再填地址；真正发请求时再校验。

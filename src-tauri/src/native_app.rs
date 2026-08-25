@@ -478,8 +478,7 @@ impl StudioApp {
                     self.selected_plugin = None;
                     self.detail = None;
                 }
-                let console_selected =
-                    self.selected_plugin.as_deref() == Some(CONSOLE_PROFILE_ID);
+                let console_selected = self.selected_plugin.as_deref() == Some(CONSOLE_PROFILE_ID);
                 if navigation_button(ui, "控制台背景", None, console_selected).clicked() {
                     self.open_plugin(CONSOLE_PROFILE_ID.to_string());
                 }

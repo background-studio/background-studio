@@ -349,9 +349,6 @@ impl MediaLibrary {
                 } else if file_type.is_file() && media_type(&extension(&path)).is_some() {
                     files.push(path);
                 }
-                if files.len() + pending.len() > 10_000 {
-                    return Err("文件夹内容过多，请选择更具体的目录。".to_string());
-                }
             }
         }
         files.sort();
@@ -996,6 +993,22 @@ mod tests {
         assert!(resolved.path.starts_with(&canonical_source));
         assert!(library.remove(&imported.added[0].id).unwrap());
         assert!(source_dir.join("bg-0.png").is_file());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scans_folder_beyond_the_legacy_entry_boundary() {
+        const LEGACY_ENTRY_BOUNDARY: usize = 10_000;
+
+        let root = std::env::temp_dir().join(format!("host-large-folder-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        for index in 0..=LEGACY_ENTRY_BOUNDARY {
+            File::create(root.join(format!("bg-{index:05}.png"))).unwrap();
+        }
+
+        let files = MediaLibrary::list_folder_media(&root).unwrap();
+        assert_eq!(files.len(), LEGACY_ENTRY_BOUNDARY + 1);
+
         let _ = fs::remove_dir_all(root);
     }
 }
