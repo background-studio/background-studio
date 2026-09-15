@@ -33,6 +33,16 @@
       "pipeName": "\\\\.\\pipe\\background-studio-multica",
       "targetHint": "Multica 桌面应用",
       "icon": "multica.png"
+    },
+    {
+      "id": "grok-bot",
+      "displayName": "Grok Bot Background Studio",
+      "owner": "background-studio",
+      "repo": "grok_bot_desktop_background",
+      "assetPrefix": "GrokBotBackgroundStudio-",
+      "exeName": "Grok Bot Background Studio.exe",
+      "pipeName": "\\\\.\\pipe\\background-studio-grok-bot",
+      "targetHint": "Grok Bot 桌面应用"
     }
   ]
 }
