@@ -865,9 +865,16 @@ impl HostCore {
                 }
             }
         };
+        let next_media_id = playlist[next].clone();
         if let Some(profile) = self.profiles.get_mut(id) {
-            profile.active_media_id = Some(playlist[next].clone());
+            profile.active_media_id = Some(next_media_id.clone());
             save_profile(self.plugins.data_dir(), id, profile)?;
+        }
+        if let Some(next_item) = self.library.get_by_id(&next_media_id) {
+            if next_item.origin == MediaOrigin::Folder {
+                self.library
+                    .advance_folder_cursor(&next_item, profile.slideshow.order)?;
+            }
         }
         Ok(true)
     }
