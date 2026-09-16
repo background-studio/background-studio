@@ -96,7 +96,7 @@ pub fn resolve_icon_path(data_dir: &Path, plugin: &PluginDef) -> Option<PathBuf>
 pub fn sync_bundled_icons(data_dir: &Path) -> Result<(), String> {
     let icons = data_dir.join("icons");
     fs::create_dir_all(&icons).map_err(|error| error.to_string())?;
-    // 内置三件套每次启动覆盖写入，避免旧错误图标（如 Notion 误用组织标）残留。
+    // 内置插件图标每次启动覆盖写入，避免旧错误图标残留。
     for (name, bytes) in [
         (
             "codex.png",
@@ -109,6 +109,10 @@ pub fn sync_bundled_icons(data_dir: &Path) -> Result<(), String> {
         (
             "multica.png",
             include_bytes!("../resources/multica.png").as_slice(),
+        ),
+        (
+            "grok-bot.png",
+            include_bytes!("../resources/grok-bot.png").as_slice(),
         ),
     ] {
         let path = icons.join(name);

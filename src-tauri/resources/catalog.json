@@ -42,7 +42,8 @@
       "assetPrefix": "GrokBotBackgroundStudio-",
       "exeName": "Grok Bot Background Studio.exe",
       "pipeName": "\\\\.\\pipe\\background-studio-grok-bot",
-      "targetHint": "Grok Bot 桌面应用"
+      "targetHint": "Grok Bot 桌面应用",
+      "icon": "grok-bot.png"
     }
   ]
 }
