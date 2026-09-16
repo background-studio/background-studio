@@ -372,11 +372,7 @@ impl HostCore {
                 resolved.byte_size.div_ceil(1024 * 1024)
             ));
         }
-        self.sync_media_server();
-        let url = self
-            .media_server
-            .url_for(&media_id)
-            .ok_or_else(|| "媒体服务未能为当前媒体生成回环 URL。".to_string())?;
+        let url = self.media_server.configure_url_for(id, &resolved)?;
         let kind = match resolved.kind {
             MediaKind::Image => "image",
             MediaKind::Video => "video",

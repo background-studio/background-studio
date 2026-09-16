@@ -28,7 +28,13 @@ struct ServedMedia {
     revision: String,
 }
 
-fn preview_revision(media: &ResolvedMedia) -> String {
+#[derive(Default)]
+struct ServedMediaState {
+    previews: HashMap<String, ServedMedia>,
+    configured: HashMap<String, ServedMedia>,
+}
+
+fn media_revision(media: &ResolvedMedia) -> String {
     let mut hasher = Sha256::new();
     hasher.update(media.path.to_string_lossy().as_bytes());
     hasher.update(media.byte_size.to_le_bytes());
@@ -114,11 +120,15 @@ pub fn is_safe_media_id(id: &str) -> bool {
 }
 
 pub fn extract_media_id(url_path: &str, token: &str) -> Option<String> {
+    extract_resource_id(url_path, token, "media")
+}
+
+fn extract_resource_id(url_path: &str, token: &str, resource: &str) -> Option<String> {
     let path = url_path.split('?').next().unwrap_or(url_path);
     if token.is_empty() || token.contains('/') || token.contains("..") {
         return None;
     }
-    let prefix = format!("/{token}/media/");
+    let prefix = format!("/{token}/{resource}/");
     let id = path.strip_prefix(&prefix)?;
     if !is_safe_media_id(id) {
         return None;
@@ -126,16 +136,22 @@ pub fn extract_media_id(url_path: &str, token: &str) -> Option<String> {
     Some(id.to_string())
 }
 
-fn serve(request: Request, token: &str, media: &Arc<RwLock<HashMap<String, ServedMedia>>>) {
+fn serve(request: Request, token: &str, media: &Arc<RwLock<ServedMediaState>>) {
     if !matches!(request.method(), Method::Get | Method::Head) {
         plain(request, 405);
         return;
     }
-    let Some(id) = extract_media_id(request.url(), token) else {
-        plain(request, 404);
-        return;
-    };
-    let Some(item) = media.read().ok().and_then(|items| items.get(&id).cloned()) else {
+    let item = media.read().ok().and_then(|state| {
+        if let Some(id) = extract_resource_id(request.url(), token, "configured") {
+            let item = state.configured.get(&id)?;
+            let (_, query) = request.url().split_once('?')?;
+            // A superseded configure URL must never serve the next selection's bytes.
+            return (query == format!("v={}", item.revision)).then(|| item.clone());
+        }
+        let id = extract_media_id(request.url(), token)?;
+        state.previews.get(&id).cloned()
+    });
+    let Some(item) = item else {
         plain(request, 404);
         return;
     };
@@ -217,7 +233,7 @@ fn serve(request: Request, token: &str, media: &Arc<RwLock<HashMap<String, Serve
 pub struct MediaServer {
     token: String,
     origin: String,
-    media: Arc<RwLock<HashMap<String, ServedMedia>>>,
+    media: Arc<RwLock<ServedMediaState>>,
     server: Arc<Server>,
     stopping: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -232,7 +248,7 @@ impl MediaServer {
             .ok_or_else(|| "媒体服务端口分配失败。".to_string())?
             .port();
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-        let media = Arc::new(RwLock::new(HashMap::new()));
+        let media = Arc::new(RwLock::new(ServedMediaState::default()));
         let stopping = Arc::new(AtomicBool::new(false));
         let thread_server = Arc::clone(&server);
         let thread_media = Arc::clone(&media);
@@ -290,7 +306,7 @@ impl MediaServer {
             let Ok(resolved) = library.resolve_playback(&item, *order, false) else {
                 continue;
             };
-            let revision = preview_revision(&resolved);
+            let revision = media_revision(&resolved);
             served.insert(
                 id.clone(),
                 ServedMedia {
@@ -302,8 +318,41 @@ impl MediaServer {
             );
         }
         if let Ok(mut media) = self.media.write() {
-            *media = served;
+            media.previews = served;
         }
+    }
+
+    pub fn configure_url_for(
+        &self,
+        plugin_id: &str,
+        resolved: &ResolvedMedia,
+    ) -> Result<String, String> {
+        if !is_safe_media_id(plugin_id) {
+            return Err("媒体服务收到无效的插件 ID。".to_string());
+        }
+        let path = resolved
+            .path
+            .canonicalize()
+            .map_err(|error| format!("媒体文件不可访问：{error}"))?;
+        let revision = media_revision(resolved);
+        let mut state = self
+            .media
+            .write()
+            .map_err(|_| "媒体服务状态不可用。".to_string())?;
+        // Keep one selection per plugin, independent of shared preview refreshes.
+        state.configured.insert(
+            plugin_id.to_string(),
+            ServedMedia {
+                path,
+                mime_type: resolved.mime_type.clone(),
+                byte_size: resolved.byte_size,
+                revision: revision.clone(),
+            },
+        );
+        Ok(format!(
+            "{}/{}/configured/{plugin_id}?v={revision}",
+            self.origin, self.token
+        ))
     }
 
     pub fn url_for(&self, id: &str) -> Option<String> {
@@ -314,7 +363,7 @@ impl MediaServer {
             .media
             .read()
             .ok()
-            .and_then(|items| items.get(id).map(|item| item.revision.clone()))?;
+            .and_then(|state| state.previews.get(id).map(|item| item.revision.clone()))?;
         Some(format!(
             "{}/{}/media/{}?v={revision}",
             self.origin, self.token, id
@@ -324,7 +373,7 @@ impl MediaServer {
     #[cfg(test)]
     pub fn register_for_test(&self, id: &str, path: PathBuf, mime_type: &str, byte_size: u64) {
         if let Ok(mut media) = self.media.write() {
-            media.insert(
+            media.previews.insert(
                 id.to_string(),
                 ServedMedia {
                     path,
@@ -352,6 +401,116 @@ mod tests {
     use super::*;
     use crate::core::media::minimal_png;
     use std::{fs, fs::File, io::Write};
+
+    fn assert_serves_configured_media(
+        client: &reqwest::blocking::Client,
+        url: &str,
+        resolved: &ResolvedMedia,
+    ) {
+        let response = client.get(url).send().unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.headers()["content-type"], resolved.mime_type);
+        let bytes = response.bytes().unwrap();
+        assert_eq!(bytes.len() as u64, resolved.byte_size);
+        assert_eq!(format!("{:x}", Sha256::digest(&bytes)), resolved.sha256);
+    }
+
+    #[test]
+    fn configured_downloads_survive_shared_folder_preview_changes() {
+        let root = std::env::temp_dir().join(format!("host-configured-http-{}", Uuid::new_v4()));
+        let folder = root.join("wallpapers");
+        fs::create_dir_all(&folder).unwrap();
+        // Exercise smaller, larger, and same-size/different-hash replacements.
+        for (index, byte_size) in [65_536, 16_384, 98_304, 65_536].into_iter().enumerate() {
+            let mut bytes = minimal_png();
+            bytes.resize(byte_size, index as u8);
+            fs::write(folder.join(format!("{index}.png")), bytes).unwrap();
+        }
+        let mut library = MediaLibrary::load(&root.join("data")).unwrap();
+        let item = library.import_folder(&folder).added.remove(0);
+        let selected = library
+            .resolve_playback(&item, SlideshowOrder::Sequential, false)
+            .unwrap();
+        let server = MediaServer::start().unwrap();
+        let configured_url = server.configure_url_for("grok", &selected).unwrap();
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        for _ in 0..3 {
+            let next = library
+                .resolve_playback(&item, SlideshowOrder::Sequential, true)
+                .unwrap();
+            server.sync(
+                &mut library,
+                &[(item.id.clone(), SlideshowOrder::Sequential)],
+            );
+            let other_plugin_url = server.configure_url_for("multica", &next).unwrap();
+
+            assert_serves_configured_media(&client, &configured_url, &selected);
+            assert_serves_configured_media(&client, &other_plugin_url, &next);
+            assert_serves_configured_media(&client, &server.url_for(&item.id).unwrap(), &next);
+        }
+
+        server.sync(&mut library, &[]);
+        assert!(server.url_for(&item.id).is_none());
+        assert_serves_configured_media(&client, &configured_url, &selected);
+        drop(server);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn configured_urls_reject_superseded_revisions_and_invalid_routes() {
+        let root =
+            std::env::temp_dir().join(format!("host-configured-revision-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let mut library = MediaLibrary::load(&root.join("data")).unwrap();
+        let server = MediaServer::start().unwrap();
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let mut previous_url = None;
+        for index in 0..2 {
+            let source = root.join(format!("{index}.png"));
+            let mut bytes = minimal_png();
+            bytes.push(index);
+            fs::write(&source, bytes).unwrap();
+            let item = library.import_files(&[source]).added.remove(0);
+            let resolved = library
+                .resolve_playback(&item, SlideshowOrder::Sequential, false)
+                .unwrap();
+            let url = server.configure_url_for("grok", &resolved).unwrap();
+            assert_serves_configured_media(&client, &url, &resolved);
+            if let Some(previous_url) = previous_url {
+                assert_eq!(
+                    client.get(previous_url).send().unwrap().status().as_u16(),
+                    404
+                );
+            }
+            previous_url = Some(url);
+            for plugin_id in ["../secret", "grok/other", ""] {
+                assert!(server.configure_url_for(plugin_id, &resolved).is_err());
+            }
+        }
+        for route in [
+            format!("/{}/configured/grok", server.token()),
+            format!("/{}/configured/grok?v=wrong", server.token()),
+            format!("/{}/configured/unknown?v=wrong", server.token()),
+            "/wrong/configured/grok?v=wrong".to_string(),
+        ] {
+            let response = client
+                .get(format!("{}{route}", server.origin()))
+                .send()
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 404);
+        }
+        drop(server);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn rejects_path_traversal_and_wrong_token() {
