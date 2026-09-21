@@ -376,6 +376,15 @@ impl PluginManager {
             }
         };
         let version_dir = version.trim_start_matches('v').to_string();
+        let installed = self
+            .state
+            .plugins
+            .iter()
+            .find(|record| record.id == id)
+            .and_then(|record| record.installed_version.as_deref());
+        // Validate before downloading or stopping a working plugin. A stale
+        // Release cache must never turn an update into a downgrade.
+        validate_install_version(installed, &version_dir)?;
         let tag = format!("v{version_dir}");
         let (owner, repo, exe_name) = {
             let spec = self.spec(id)?;
@@ -732,9 +741,7 @@ impl PluginManager {
                 }
             }
             let update_available = match (&record.installed_version, &latest_version) {
-                (Some(installed), Some(latest)) => {
-                    installed.trim_start_matches('v') != latest.trim_start_matches('v')
-                }
+                (Some(installed), Some(latest)) => host_update::version_newer(latest, installed),
                 _ => false,
             };
             let icon_path = catalog::resolve_icon_path(&self.data_dir, &plugin)
@@ -798,6 +805,19 @@ impl PluginManager {
             console_background: ConsoleBackground::default(),
         }
     }
+}
+
+fn validate_install_version(installed: Option<&str>, candidate: &str) -> Result<(), String> {
+    semver::Version::parse(candidate.trim_start_matches('v'))
+        .map_err(|_| format!("远端插件版本号无效：{candidate}；未执行安装。"))?;
+    if let Some(installed) = installed {
+        if !host_update::version_newer(candidate, installed) {
+            return Err(format!(
+                "远端版本 {candidate} 不高于本地版本 {installed}，或本地版本无法比较；为防止降级，未执行安装。"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn request_shutdown_blocking(pipe_name: &str) -> Result<Value, String> {
@@ -985,9 +1005,38 @@ fn detect_standalone_warning() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::select_plugin_asset;
+    use super::{select_plugin_asset, validate_install_version};
     use crate::catalog::PluginDef;
     use serde_json::json;
+
+    #[test]
+    fn plugin_updates_require_a_strictly_newer_version() {
+        for (installed, candidate, allowed) in [
+            ("0.3.7", "v0.3.6", false),
+            ("v0.3.7", "0.3.7", false),
+            ("0.3.6", "v0.3.7", true),
+            ("0.3.9", "0.3.10", true),
+            ("0.3.7", "0.3.7-beta.1", false),
+            ("0.3.7-beta.1", "0.3.7", true),
+            ("invalid", "0.3.7", false),
+            ("0.3.7", "invalid", false),
+        ] {
+            assert_eq!(
+                crate::host_update::version_newer(candidate, installed),
+                allowed
+            );
+            assert_eq!(
+                validate_install_version(Some(installed), candidate).is_ok(),
+                allowed
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_install_requires_a_valid_release_version() {
+        assert!(validate_install_version(None, "v0.3.6").is_ok());
+        assert!(validate_install_version(None, "invalid").is_err());
+    }
 
     fn plugin() -> PluginDef {
         PluginDef {
