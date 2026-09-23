@@ -6,11 +6,12 @@
 统一壳：Windows 托盘只显示一个 **Background Studio**，集中管理媒体、设置并在后台安装、启停
 [Codex](https://github.com/background-studio/codex_desktop_background) /
 [Notion](https://github.com/background-studio/notion_desktop_background) /
-[Multica](https://github.com/background-studio/multica_desktop_background) 背景插件。
+[Multica](https://github.com/background-studio/multica_desktop_background) /
+[Rebased](https://github.com/background-studio/rebased_desktop_background) 背景插件。
 
 插件仍从各自仓库 Release 下载 `*-plugin.zip`，壳不内嵌 CDP / 注入样式。
 
-> 非 OpenAI / Notion / Multica 官方产品。
+> 非 OpenAI / Notion / Multica / Rebased 官方产品。
 
 ## 安装
 
@@ -69,4 +70,4 @@ git push origin v0.1.3
 ```
 
 推送 `v*` 标签后，GitHub Actions 构建 NSIS 并创建 Release。
-壳依赖插件 Release 中存在 `*-plugin.zip`（Codex ≥ 0.5.0 / Notion ≥ 0.2.0 / Multica ≥ 0.1.0）。
+壳依赖插件 Release 中存在 `*-plugin.zip`（Codex ≥ 0.5.0 / Notion ≥ 0.2.0 / Multica ≥ 0.1.0 / Rebased ≥ 0.1.0）。

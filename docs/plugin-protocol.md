@@ -9,6 +9,7 @@
 - `CodexBackgroundStudio-<version>-plugin.zip`
 - `NotionBackgroundStudio-<version>-plugin.zip`
 - `MulticaBackgroundStudio-<version>-plugin.zip`
+- `RebasedBackgroundStudio-<version>-plugin.zip`
 
 zip 根目录必须包含 worker exe 和 `plugin.json`。壳会限制压缩包文件数量、单文件大小和总解压大小，先解到暂存目录，校验 Manifest 与 exe 后再原子替换旧版本。
 
@@ -60,6 +61,10 @@ zip 根目录必须包含 worker exe 和 `plugin.json`。壳会限制压缩包�
 
 该机制不修改目标程序文件、签名、快捷方式或注册表启动入口。
 
+Rebased 是 IntelliJ 平台应用，不走调试会话：worker 往 Rebased 的用户插件目录放一个桥接插件，
+由它在 Rebased 进程内显示背景。桥接插件装好之前就在运行的 Rebased 需要 `apply` 重启一次；
+细节见 [rebased_desktop_background 的协议文档](https://github.com/background-studio/rebased_desktop_background/blob/main/docs/plugin-protocol.md)。
+
 ## Named Pipe
 
 | 插件 | Pipe |
@@ -67,6 +72,7 @@ zip 根目录必须包含 worker exe 和 `plugin.json`。壳会限制压缩包�
 | Codex | `\\.\pipe\background-studio-codex` |
 | Notion | `\\.\pipe\background-studio-notion` |
 | Multica | `\\.\pipe\background-studio-multica` |
+| Rebased | `\\.\pipe\background-studio-rebased` |
 
 传输格式为一行一条 UTF-8 JSON（NDJSON）。请求与响应必须使用同一个非空 `id`：
 

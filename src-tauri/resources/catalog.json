@@ -44,6 +44,17 @@
       "pipeName": "\\\\.\\pipe\\background-studio-grok-bot",
       "targetHint": "Grok Bot 桌面应用",
       "icon": "grok-bot.png"
+    },
+    {
+      "id": "rebased",
+      "displayName": "Rebased Background Studio",
+      "owner": "background-studio",
+      "repo": "rebased_desktop_background",
+      "assetPrefix": "RebasedBackgroundStudio-",
+      "exeName": "Rebased Background Studio.exe",
+      "pipeName": "\\\\.\\pipe\\background-studio-rebased",
+      "targetHint": "Rebased Git 客户端",
+      "icon": "rebased.png"
     }
   ]
 }

@@ -114,6 +114,10 @@ pub fn sync_bundled_icons(data_dir: &Path) -> Result<(), String> {
             "grok-bot.png",
             include_bytes!("../resources/grok-bot.png").as_slice(),
         ),
+        (
+            "rebased.png",
+            include_bytes!("../resources/rebased.png").as_slice(),
+        ),
     ] {
         let path = icons.join(name);
         fs::write(&path, bytes).map_err(|error| error.to_string())?;
