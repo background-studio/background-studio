@@ -10,3 +10,4 @@ app-icon-source.png
 *.code-workspace
 poc/
 
+.bce-tool/
