@@ -27,7 +27,10 @@ chrono = "0.4.45"
 url = "2.5.8"
 ipnet = "2.12.1"
 percent-encoding = "2.3.2"
-eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "glow", "wgpu_no_default_features"] }
+# Only the DX12 backend; eframe's `wgpu` feature would also build Vulkan, GL and WebGL, and
+# glow already covers machines where DX12 is unavailable.
+wgpu = { version = "30", default-features = false, features = ["dx12"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "avif"] }
 tray-icon = "0.24.2"
 rfd = "0.17.2"

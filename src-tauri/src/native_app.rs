@@ -1,7 +1,9 @@
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     num::NonZeroUsize,
     path::PathBuf,
+    rc::Rc,
     sync::{mpsc, Arc},
     time::Duration,
 };
@@ -107,28 +109,53 @@ pub fn run() -> Result<(), String> {
         .with_inner_size([1180.0, 760.0])
         .with_min_inner_size([960.0, 620.0])
         .with_icon(load_window_icon());
-    let options = eframe::NativeOptions {
-        viewport,
-        renderer: eframe::Renderer::Glow,
-        ..Default::default()
+    let options = |renderer| {
+        let mut options = eframe::NativeOptions {
+            viewport: viewport.clone(),
+            renderer,
+            ..Default::default()
+        };
+        // The default HighPerformance would wake a discrete GPU for a tray app.
+        if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup
+        {
+            setup.power_preference = wgpu::PowerPreference::LowPower;
+        }
+        options
     };
-    eframe::run_native(
+    // Taken by whichever renderer gets far enough to create the app.
+    let pending = Rc::new(RefCell::new(Some((data_dir, instance))));
+    let app_creator = |pending: Rc<RefCell<Option<(PathBuf, PrimaryInstance)>>>| {
+        let core = Arc::clone(&core);
+        let runtime = Arc::clone(&runtime);
+        let creator: eframe::AppCreator<'static> = Box::new(move |creation| {
+            let (data_dir, instance) = pending
+                .borrow_mut()
+                .take()
+                .ok_or_else(|| std::io::Error::other("Background Studio 已经创建过窗口。"))?;
+            StudioApp::new(creation, core, runtime, start_minimized, data_dir, instance)
+                .map(|app| Box::new(app) as Box<dyn eframe::App>)
+                .map_err(|error| std::io::Error::other(error).into())
+        });
+        creator
+    };
+    // glow makes the Intel OpenGL driver spin a whole core while waiting for vsync; DX12
+    // presents without that. glow stays as the fallback when no DX12 adapter is usable.
+    match eframe::run_native(
         "Background Studio",
-        options,
-        Box::new(move |creation| {
-            StudioApp::new(
-                creation,
-                Arc::clone(&core),
-                Arc::clone(&runtime),
-                start_minimized,
-                data_dir,
-                instance,
+        options(eframe::Renderer::Wgpu),
+        app_creator(Rc::clone(&pending)),
+    ) {
+        Err(error) if pending.borrow().is_some() => {
+            eprintln!("DX12 渲染初始化失败，改用 OpenGL：{error}");
+            eframe::run_native(
+                "Background Studio",
+                options(eframe::Renderer::Glow),
+                app_creator(pending),
             )
-            .map(|app| Box::new(app) as Box<dyn eframe::App>)
-            .map_err(|error| std::io::Error::other(error).into())
-        }),
-    )
-    .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())
+        }
+        result => result.map_err(|error| error.to_string()),
+    }
 }
 
 fn load_window_icon() -> Arc<egui::IconData> {
