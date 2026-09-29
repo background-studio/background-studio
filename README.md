@@ -32,6 +32,7 @@ scoop update background-studio
 - 单托盘宿主机
 - 从 GitHub Release 安装 / 更新 / 卸载插件（带下载进度）
 - 共享媒体库、插件 Profile、轮播与统一插件详情页；插件不再各自维护 WebView 界面
+- 支持 `perWindowMedia` 的 Cursor Agent 插件可按窗口独立选图和轮播：新窗口不扰动旧窗口，窗口间优先避开重复文件，IDE 背景保持独立；需要同时更新宿主与插件
 - 启用后以 `--plugin` 启动纯 Rust worker（无窗口、WebView 或独立托盘），自动等待并接管之后启动的目标程序
 - 启用前已经运行的目标不会被静默关闭，可从壳里手动“重启并接管”
 - 协议 2 通过 Named Pipe 下发回环媒体与显示设置，并实时汇总等待 / 接管 / 活动状态
@@ -65,9 +66,10 @@ cargo packager --release
 ## 发布
 
 ```powershell
-git tag v0.1.3
-git push origin v0.1.3
+git tag v0.3.6-beta.2
+git push origin v0.3.6-beta.2
 ```
 
 推送 `v*` 标签后，GitHub Actions 构建 NSIS 并创建 Release。
+每版发布说明放在 `docs/releases/<version>.md`；带 `-beta` 的标签发布为预发布版本，不替换稳定版。当前版本详见 [0.3.6-beta.2 发布说明](docs/releases/0.3.6-beta.2.md)，Cursor Agent 配套插件为 0.1.4-beta.1。
 壳依赖插件 Release 中存在 `*-plugin.zip`（Codex ≥ 0.5.0 / Notion ≥ 0.2.0 / Multica ≥ 0.1.0 / Rebased ≥ 0.1.0）。

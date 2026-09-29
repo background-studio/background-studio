@@ -370,6 +370,21 @@ impl MediaServer {
         ))
     }
 
+    pub(super) fn configure_window_url_for(
+        &self,
+        plugin_id: &str,
+        target_id: &str,
+        resolved: &ResolvedMedia,
+    ) -> Result<String, String> {
+        self.configure_url_for(&window_slot(plugin_id, target_id), resolved)
+    }
+
+    pub(super) fn remove_window(&self, plugin_id: &str, target_id: &str) {
+        if let Ok(mut state) = self.media.write() {
+            state.configured.remove(&window_slot(plugin_id, target_id));
+        }
+    }
+
     #[cfg(test)]
     pub fn register_for_test(&self, id: &str, path: PathBuf, mime_type: &str, byte_size: u64) {
         if let Ok(mut media) = self.media.write() {
@@ -394,6 +409,14 @@ impl Drop for MediaServer {
             let _ = thread.join();
         }
     }
+}
+
+fn window_slot(plugin_id: &str, target_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(plugin_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(target_id.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(test)]
@@ -457,6 +480,67 @@ mod tests {
         server.sync(&mut library, &[]);
         assert!(server.url_for(&item.id).is_none());
         assert_serves_configured_media(&client, &configured_url, &selected);
+        drop(server);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn window_urls_are_isolated_from_other_windows_plugins_and_previews() {
+        let root = std::env::temp_dir().join(format!("host-window-http-{}", Uuid::new_v4()));
+        let folder = root.join("wallpapers");
+        fs::create_dir_all(&folder).unwrap();
+        for index in 0..3 {
+            let mut bytes = minimal_png();
+            bytes.push(index);
+            fs::write(folder.join(format!("{index}.png")), bytes).unwrap();
+        }
+        let mut library = MediaLibrary::load(&root.join("data")).unwrap();
+        let item = library.import_folder(&folder).added.remove(0);
+        let preview = library
+            .resolve_playback(&item, SlideshowOrder::Sequential, false)
+            .unwrap();
+        let paths = library
+            .window_candidates(&[item.id.clone(), item.id.clone()])
+            .unwrap();
+        assert_eq!(paths.len(), 3, "overlapping sources must be deduplicated");
+        let a = MediaLibrary::resolve_folder_file(paths[0].clone()).unwrap();
+        let b = MediaLibrary::resolve_folder_file(paths[1].clone()).unwrap();
+        let c = MediaLibrary::resolve_folder_file(paths[2].clone()).unwrap();
+        assert_eq!(
+            library
+                .resolve_playback(&item, SlideshowOrder::Sequential, false)
+                .unwrap()
+                .path,
+            preview.path,
+            "window enumeration must not advance shared preview"
+        );
+        let server = MediaServer::start().unwrap();
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let a_url = server
+            .configure_window_url_for("cursor-agent", "A", &a)
+            .unwrap();
+        let b_url = server
+            .configure_window_url_for("cursor-agent", "B", &b)
+            .unwrap();
+        let other_url = server.configure_window_url_for("other", "A", &b).unwrap();
+        server.configure_url_for("cursor-agent", &preview).unwrap();
+        server.sync(&mut library, &[(item.id, SlideshowOrder::Sequential)]);
+        assert_serves_configured_media(&client, &a_url, &a);
+        assert_serves_configured_media(&client, &b_url, &b);
+        let c_url = server
+            .configure_window_url_for("cursor-agent", "A", &c)
+            .unwrap();
+        assert_eq!(client.get(&a_url).send().unwrap().status().as_u16(), 404);
+        assert_serves_configured_media(&client, &b_url, &b);
+        assert_serves_configured_media(&client, &other_url, &b);
+        assert_serves_configured_media(&client, &c_url, &c);
+        server.remove_window("cursor-agent", "A");
+        assert_eq!(client.get(&c_url).send().unwrap().status().as_u16(), 404);
+        assert_serves_configured_media(&client, &b_url, &b);
         drop(server);
         fs::remove_dir_all(root).unwrap();
     }

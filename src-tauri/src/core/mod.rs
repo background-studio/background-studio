@@ -8,6 +8,7 @@ mod network;
 mod persist;
 mod profile;
 pub mod protocol;
+mod window_media;
 
 use std::{
     collections::HashMap,
@@ -78,6 +79,7 @@ pub struct HostCore {
     /// 控制台背景当前解析出的图片文件（事件驱动更新，避免快照循环反复解析）。
     console_background_path: Option<PathBuf>,
     last_phase: HashMap<String, String>,
+    window_media: HashMap<String, HashMap<String, window_media::WindowMedia>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -121,6 +123,7 @@ impl HostCore {
             slideshow_ticks: HashMap::new(),
             console_background_path: None,
             last_phase: HashMap::new(),
+            window_media: HashMap::new(),
         };
         core.load_profiles()?;
         core.sync_media_server();
@@ -232,6 +235,7 @@ impl HostCore {
         self.plugins.relocate_data_directory(new_root)?;
         self.library = MediaLibrary::load(self.plugins.data_dir())?;
         self.media_server = MediaServer::start()?;
+        self.window_media.clear();
         self.profiles.clear();
         self.load_profiles()?;
         self.sync_media_server();
@@ -247,6 +251,7 @@ impl HostCore {
     }
 
     pub fn uninstall(&mut self, id: &str) -> Result<(), String> {
+        self.clear_window_media(id);
         self.hello.remove(id);
         self.slideshow_ticks.remove(id);
         self.last_phase.remove(id);
@@ -255,6 +260,7 @@ impl HostCore {
 
     pub fn set_enabled(&mut self, id: &str, enabled: bool) -> Result<(), String> {
         if !enabled {
+            self.clear_window_media(id);
             self.hello.remove(id);
         }
         self.plugins.set_enabled(id, enabled)
@@ -343,9 +349,16 @@ impl HostCore {
         let params = self
             .build_configure(id)?
             .ok_or_else(|| "请先选择要应用的媒体。".to_string())?;
-        self.plugins
+        let result = self
+            .plugins
             .plugin_request(id, "configure", Some(params))
-            .await
+            .await?;
+        if let Some(windows) = self.window_media.get_mut(id) {
+            for window in windows.values_mut() {
+                window.dirty = true;
+            }
+        }
+        Ok(result)
     }
 
     fn build_configure(&mut self, id: &str) -> Result<Option<Value>, String> {
@@ -387,7 +400,11 @@ impl HostCore {
             byte_size: resolved.byte_size,
         };
         let revision = revision_digest(&media.sha256, &display);
-        Ok(Some(build_configure_params(revision, media, display)?))
+        let mut params = build_configure_params(revision, media, display)?;
+        if self.supports_window_media(id) {
+            params["independentWindows"] = Value::Bool(true);
+        }
+        Ok(Some(params))
     }
 
     fn runtime_protocol(&self, id: &str) -> u32 {
@@ -715,6 +732,11 @@ impl HostCore {
             }
             _ => return Err("只有文件夹源或随机 API 可以刷新。".to_string()),
         }
+        if let Some(windows) = self.window_media.get_mut(plugin_id) {
+            for window in windows.values_mut() {
+                window.refresh = true;
+            }
+        }
         self.reconfigure_running(plugin_id).await?;
         self.refresh_console_background();
         self.plugin_detail(plugin_id).await
@@ -732,6 +754,7 @@ impl HostCore {
     }
 
     pub async fn tick_slideshow(&mut self) -> Result<(), String> {
+        let mut first_error = self.tick_window_media().await.err();
         let now = Instant::now();
         let ids: Vec<String> = self
             .profiles
@@ -740,10 +763,10 @@ impl HostCore {
                 profile.slideshow.enabled
                     && self.plugins.is_enabled(id)
                     && self.runtime_protocol(id) >= HOST_PROTOCOL
+                    && !self.supports_window_media(id)
             })
             .map(|(id, _)| id.clone())
             .collect();
-        let mut first_error = None;
         for id in ids {
             let interval = self
                 .profiles

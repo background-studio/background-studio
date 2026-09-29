@@ -46,6 +46,17 @@
       "icon": "grok-bot.png"
     },
     {
+      "id": "cursor-agent",
+      "displayName": "Cursor Agent Background Studio",
+      "owner": "background-studio",
+      "repo": "cursor_agent_window_background",
+      "assetPrefix": "CursorAgentBackgroundStudio-",
+      "exeName": "Cursor Agent Background Studio.exe",
+      "pipeName": "\\\\.\\pipe\\background-studio-cursor-agent",
+      "targetHint": "Cursor Agent 窗口",
+      "icon": "cursor-agent.png"
+    },
+    {
       "id": "rebased",
       "displayName": "Rebased Background Studio",
       "owner": "background-studio",

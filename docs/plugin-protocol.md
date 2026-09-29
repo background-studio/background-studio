@@ -139,6 +139,19 @@ worker 必须拒绝 HTTPS、公网或局域网地址、userinfo、重定向、�
 
 有效配置先构建完整注入 payload，再替换内存中的上一份配置。目标已处于 `active` 时可热更新；否则只保存配置并继续等待。
 
+#### 可选扩展：按窗口独立媒体
+
+仅在运行中 worker 的 `hello.capabilities.perWindowMedia === true` 时协商启用；不能仅凭安装清单推断。未声明该能力的插件仍使用原来的同步轮播。
+
+- 基础 `configure` 增加 `independentWindows: true`，用于配置并启动窗口发现；保留原来的 `media` 和 `display` 字段，但不将基础媒体覆盖到已分配的窗口。
+- `status` 增加 `independentWindows`、`targetIds: string[]`、`configuredTargetIds: string[]`。只有实际通过 Agent 页面探测的窗口才能进入 `targetIds`，IDE 不包含在内。ID 为 1–64 个 ASCII 字母、数字、`-` 或 `_`。
+- 单窗口 `configure` 在原字段之外增加 `independentWindows: true`、`targetId: "<id>"`。每次只传一个媒体，完整验证后原子替换该窗口的配置，不影响其他窗口。未建立独立模式时拒绝定向配置。
+- 宿主保留各窗口的媒体与计时点；即使关闭轮播也为新窗口分配背景，关闭轮播时只使用当前激活源。开启轮播时使用播放列表（没有列表时使用激活源），展开文件夹但不推进共享预览游标。随机/顺序选择优先避开其他窗口占用的文件及自己的上一张；文件不足允许重复。
+- 显示设置变更复用现有选择；新窗口不改变已有选择及其计时点。窗口关闭后释放对应配置下载槽；worker 丢失配置时重发该窗口原选择。暂停期间不下发或自动执行 `apply`。
+- 每个 `(pluginId, targetId)` 使用独立、带令牌与版本校验的回环下载槽，避免其他窗口或预览换图改变正在下载的内容；不向 worker 传本机路径。
+
+宿主与 Cursor Agent worker 均每 2 秒轮询；注入时延还包括页面加载和媒体传输。独立轮播需要同时更新两端，旧宿主搭配新 worker 仍保持原单媒体行为。
+
 ### `status`
 
 至少返回：

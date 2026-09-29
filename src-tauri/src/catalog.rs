@@ -118,6 +118,10 @@ pub fn sync_bundled_icons(data_dir: &Path) -> Result<(), String> {
             "rebased.png",
             include_bytes!("../resources/rebased.png").as_slice(),
         ),
+        (
+            "cursor-agent.png",
+            include_bytes!("../resources/cursor-agent.png").as_slice(),
+        ),
     ] {
         let path = icons.join(name);
         fs::write(&path, bytes).map_err(|error| error.to_string())?;

@@ -440,7 +440,7 @@ impl MediaLibrary {
         Ok(resolved)
     }
 
-    fn resolve_folder_file(path: PathBuf) -> Result<ResolvedMedia, String> {
+    pub(super) fn resolve_folder_file(path: PathBuf) -> Result<ResolvedMedia, String> {
         let chosen_extension = extension(&path);
         let media_type =
             media_type(&chosen_extension).ok_or_else(|| "不支持此图片或视频格式。".to_string())?;
@@ -463,6 +463,35 @@ impl MediaLibrary {
             kind: media_type.kind.owned(),
             sha256: digest,
         })
+    }
+
+    /// Enumerate eligible files without advancing the shared preview/folder cursor.
+    /// Content validation and hashing happen only for the selected file.
+    pub(super) fn window_candidates(&mut self, ids: &[String]) -> Result<Vec<PathBuf>, String> {
+        let mut result = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for id in ids {
+            let item = self
+                .get_by_id(id)
+                .ok_or_else(|| "轮播媒体不存在。".to_string())?;
+            let paths = if item.origin == MediaOrigin::Folder {
+                self.folder_files_cached(&item)?.to_vec()
+            } else {
+                vec![self.path_for(&item)?]
+            };
+            for path in paths {
+                let path = path
+                    .canonicalize()
+                    .map_err(|error| format!("媒体文件不可访问：{error}"))?;
+                if seen.insert(path.clone()) {
+                    result.push(path);
+                }
+            }
+        }
+        if result.is_empty() {
+            return Err("图库中没有可用于窗口背景的媒体。".to_string());
+        }
+        Ok(result)
     }
 
     pub fn advance_folder_cursor(
