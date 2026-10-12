@@ -66,10 +66,10 @@ cargo packager --release
 ## 发布
 
 ```powershell
-git tag v0.3.6-beta.2
-git push origin v0.3.6-beta.2
+git tag v0.3.6
+git push origin v0.3.6
 ```
 
 推送 `v*` 标签后，GitHub Actions 构建 NSIS 并创建 Release。
-每版发布说明放在 `docs/releases/<version>.md`；带 `-beta` 的标签发布为预发布版本，不替换稳定版。当前版本详见 [0.3.6-beta.2 发布说明](docs/releases/0.3.6-beta.2.md)，Cursor Agent 配套插件为 0.1.4-beta.1。
+每版发布说明放在 `docs/releases/<version>.md`；带 `-beta` 的标签发布为预发布版本，不替换稳定版。当前版本详见 [0.3.6 发布说明](docs/releases/0.3.6.md)，Cursor Agent 配套插件为 0.1.4。
 壳依赖插件 Release 中存在 `*-plugin.zip`（Codex ≥ 0.5.0 / Notion ≥ 0.2.0 / Multica ≥ 0.1.0 / Rebased ≥ 0.1.0）。
