@@ -589,7 +589,20 @@ pub fn refresh_official(
         && cache
             .fetched_at
             .is_some_and(|fetched| now >= fetched && now - fetched < REGISTRY_TTL_SECS);
-    if mode == RefreshMode::Auto && fresh {
+    // 上次请求失败的状态必须保留到下一次成功（200 / 304）为止：
+    // 先看失败与退避，再看 TTL，避免手动失败后的自动刷新把警告隐去。
+    let last_failed = cache.consecutive_failures > 0;
+    if mode == RefreshMode::Auto && last_failed {
+        if let Some(retry_at) = cache.next_retry_at.filter(|retry_at| now < *retry_at) {
+            let error = cache
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "上次请求失败".to_string());
+            let error = format!("{error}（退避中，{} 后重试）", format_timestamp(retry_at));
+            return failure_outcome(&path, &cache, cached, 0, error, None);
+        }
+        // 退避已结束：即使仍在 TTL 内也重新请求，成功才清除失败状态。
+    } else if mode == RefreshMode::Auto && fresh {
         return outcome(
             &path,
             &cache,
@@ -599,16 +612,6 @@ pub fn refresh_official(
             None,
             None,
         );
-    }
-    if mode == RefreshMode::Auto {
-        if let Some(retry_at) = cache.next_retry_at.filter(|retry_at| now < *retry_at) {
-            let error = cache
-                .last_error
-                .clone()
-                .unwrap_or_else(|| "上次请求失败".to_string());
-            let error = format!("{error}（退避中，{} 后重试）", format_timestamp(retry_at));
-            return failure_outcome(&path, &cache, cached, 0, error, None);
-        }
     }
 
     let etag = cached.as_ref().and(cache.etag.clone());
@@ -1431,6 +1434,50 @@ pub mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// 回归：TTL 内手动刷新失败后，紧接着的自动刷新不得变成干净的 FreshCache；
+    /// 退避内 0 GET 且保留警告，直到下一次 200 / 304 成功才清除。
+    #[test]
+    fn force_failure_within_ttl_is_not_hidden_by_auto_fresh_cache() {
+        let dir = temp_dir();
+        let transport = FakeTransport::new(vec![
+            body(&sample_registry()),
+            Err("代理连接失败".to_string()),
+            Err("代理连接失败".to_string()),
+            Ok(HttpOutcome::NotModified { etag: None }),
+        ]);
+        let ok = refresh_official(&dir, &transport, RefreshMode::Auto, 0);
+        assert_eq!(ok.origin, RegistryOrigin::Network);
+
+        let forced = refresh_official(&dir, &transport, RefreshMode::Force, 10);
+        assert_eq!(forced.origin, RegistryOrigin::StaleCache);
+        assert_eq!(forced.cache.consecutive_failures, 1);
+
+        // 仍在 TTL 内、退避内：0 GET，保留失败状态与警告。
+        let auto = refresh_official(&dir, &transport, RefreshMode::Auto, 11);
+        assert_eq!(auto.origin, RegistryOrigin::StaleCache);
+        assert_eq!(auto.http_requests, 0);
+        assert_eq!(transport.count(), 2);
+        assert!(auto.warning.as_deref().unwrap().contains("代理连接失败"));
+        assert!(auto.error.as_deref().unwrap().contains("退避"));
+        assert_eq!(auto.cache.consecutive_failures, 1);
+
+        // 退避结束但仍在 TTL 内：重新请求；再失败继续保留。
+        let retry = refresh_official(&dir, &transport, RefreshMode::Auto, 10 + backoff_secs(1));
+        assert_eq!(retry.http_requests, 1);
+        assert_eq!(retry.origin, RegistryOrigin::StaleCache);
+        assert_eq!(retry.cache.consecutive_failures, 2);
+
+        // 304 成功后才清除失败状态，随后自动刷新回到干净的 FreshCache。
+        let recovered = refresh_official(&dir, &transport, RefreshMode::Force, 200);
+        assert_eq!(recovered.origin, RegistryOrigin::NotModified);
+        assert!(recovered.warning.is_none());
+        assert_eq!(recovered.cache.consecutive_failures, 0);
+        let clean = refresh_official(&dir, &transport, RefreshMode::Auto, 201);
+        assert_eq!(clean.origin, RegistryOrigin::FreshCache);
+        assert!(clean.warning.is_none());
+        assert_eq!(clean.http_requests, 0);
+        let _ = fs::remove_dir_all(dir);
+    }
     /// 真实生成器输出的子集（codex + factory + host），保证与线上 schema 兼容。
     #[test]
     fn real_generator_fixture_is_accepted() {
