@@ -66,6 +66,17 @@
       "pipeName": "\\\\.\\pipe\\background-studio-rebased",
       "targetHint": "Rebased Git 客户端",
       "icon": "rebased.png"
+    },
+    {
+      "id": "factory",
+      "displayName": "Factory Background Studio",
+      "owner": "background-studio",
+      "repo": "factory_desktop_background",
+      "assetPrefix": "FactoryBackgroundStudio-",
+      "exeName": "Factory Background Studio.exe",
+      "pipeName": "\\\\.\\pipe\\background-studio-factory",
+      "targetHint": "Factory 桌面应用（Droid）",
+      "icon": "factory.png"
     }
   ]
 }

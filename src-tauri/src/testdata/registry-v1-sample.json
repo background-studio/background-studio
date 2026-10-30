@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-30T11:02:59Z",
+  "plugins": [
+    {
+      "id": "codex",
+      "displayName": "Codex Background Studio",
+      "owner": "background-studio",
+      "repo": "codex_desktop_background",
+      "assetPrefix": "CodexBackgroundStudio-",
+      "exeName": "Codex Background Studio.exe",
+      "pipeName": "\\\\.\\pipe\\background-studio-codex",
+      "targetHint": "OpenAI Codex 桌面应用",
+      "icon": "codex.png",
+      "releases": {
+        "stable": {
+          "version": "0.6.5",
+          "tag": "v0.6.5",
+          "assetName": "CodexBackgroundStudio-0.6.5-plugin.zip",
+          "downloadUrl": "https://github.com/background-studio/codex_desktop_background/releases/download/v0.6.5/CodexBackgroundStudio-0.6.5-plugin.zip",
+          "releaseUrl": "https://github.com/background-studio/codex_desktop_background/releases/tag/v0.6.5",
+          "sha256": "d455ed1345e672c34dae5b53c15b263070735ef074a2abd401af5b0ca64f007f"
+        },
+        "prerelease": {
+          "version": "0.6.5-beta.2",
+          "tag": "v0.6.5-beta.2",
+          "assetName": "CodexBackgroundStudio-0.6.5-beta.2-plugin.zip",
+          "downloadUrl": "https://github.com/background-studio/codex_desktop_background/releases/download/v0.6.5-beta.2/CodexBackgroundStudio-0.6.5-beta.2-plugin.zip",
+          "releaseUrl": "https://github.com/background-studio/codex_desktop_background/releases/tag/v0.6.5-beta.2",
+          "sha256": "628d1639d68af4e7b37691616da4b55fa483635ed9d03ac6cef9bd563fb09754"
+        }
+      }
+    },
+    {
+      "id": "factory",
+      "displayName": "Factory Background Studio",
+      "owner": "background-studio",
+      "repo": "factory_desktop_background",
+      "assetPrefix": "FactoryBackgroundStudio-",
+      "exeName": "Factory Background Studio.exe",
+      "pipeName": "\\\\.\\pipe\\background-studio-factory",
+      "targetHint": "Factory 桌面应用（Droid）",
+      "icon": "factory.png",
+      "releases": {
+        "stable": {
+          "version": "0.1.1",
+          "tag": "v0.1.1",
+          "assetName": "FactoryBackgroundStudio-0.1.1-plugin.zip",
+          "downloadUrl": "https://github.com/background-studio/factory_desktop_background/releases/download/v0.1.1/FactoryBackgroundStudio-0.1.1-plugin.zip",
+          "releaseUrl": "https://github.com/background-studio/factory_desktop_background/releases/tag/v0.1.1",
+          "sha256": "43d24b29ff8d077e783c1e219ddc9f9d5382ab0a421ed4cdbe2bb3b9f729a3b4"
+        },
+        "prerelease": null
+      }
+    }
+  ],
+  "host": {
+    "stable": {
+      "version": "0.3.6",
+      "tag": "v0.3.6",
+      "assetName": "Background.Studio_0.3.6_x64-setup.exe",
+      "downloadUrl": "https://github.com/background-studio/background-studio/releases/download/v0.3.6/Background.Studio_0.3.6_x64-setup.exe",
+      "releaseUrl": "https://github.com/background-studio/background-studio/releases/tag/v0.3.6",
+      "sha256": "e4014ac493bb7f747debac1ce2f4971dd8cf3b34606940f125f5de7e8919c97d"
+    },
+    "prerelease": {
+      "version": "0.3.6-beta.2",
+      "tag": "v0.3.6-beta.2",
+      "assetName": "Background.Studio_0.3.6-beta.2_x64-setup.exe",
+      "downloadUrl": "https://github.com/background-studio/background-studio/releases/download/v0.3.6-beta.2/Background.Studio_0.3.6-beta.2_x64-setup.exe",
+      "releaseUrl": "https://github.com/background-studio/background-studio/releases/tag/v0.3.6-beta.2",
+      "sha256": "0c6da0ffd00cb53b132563b89251020e5be61d59a20524cd1c598aa318bef272"
+    }
+  }
+}

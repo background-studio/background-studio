@@ -37,8 +37,10 @@ scoop update background-studio
 - 启用前已经运行的目标不会被静默关闭，可从壳里手动“重启并接管”
 - 协议 2 通过 Named Pipe 下发回环媒体与显示设置，并实时汇总等待 / 接管 / 活动状态
 - 协议 1 插件可在升级期间继续启停和应用，但不提供统一媒体与设置能力
-- 「检查更新」同时检查插件与壳自身；可下载并启动壳安装包
-- 本机已安装并登录 [GitHub CLI](https://cli.github.com/)（`gh auth login`）时，查版优先走 `gh api`，不易撞匿名 API 限流；未登录则仍用匿名 HTTP
+- 「检查更新」只请求一次官方静态清单（`background-studio/.github` 的 `registry/v1.json`），同时得到官方插件目录、插件版本与壳版本；不需要 `gh` 或登录，也不调用 GitHub REST API。清单缓存 5 分钟并用 ETag 重验，失败时回用上次成功缓存并在界面顶部警告
+- 官方清单提供 SHA-256 时，插件包在解压 / 停止旧插件前、壳安装包在启动安装程序前校验；仍需用户点击安装，不会静默升级
+- 官方清单新增的插件无需升级壳即可出现在列表中；本地 `catalog.json` 仅用于自定义插件，自定义插件仍走 GitHub REST（已登录 `gh` 时用 `gh api`），并带缓存与退避
+- 查更诊断：`"Background Studio.exe" --check-updates-json <outputPath> [--force-refresh] [--diagnostic-data-dir <dir>]`，输出数据源、缓存、请求计数与选中版本（详见协议文档）
 - 仅注册壳自己的开机启动
 - 检测到独立版自启动时提示，避免双托盘（不自动卸载）
 
@@ -66,10 +68,10 @@ cargo packager --release
 ## 发布
 
 ```powershell
-git tag v0.3.6
-git push origin v0.3.6
+git tag v0.3.7
+git push origin v0.3.7
 ```
 
 推送 `v*` 标签后，GitHub Actions 构建 NSIS 并创建 Release。
-每版发布说明放在 `docs/releases/<version>.md`；带 `-beta` 的标签发布为预发布版本，不替换稳定版。当前版本详见 [0.3.6 发布说明](docs/releases/0.3.6.md)，Cursor Agent 配套插件为 0.1.4。
+每版发布说明放在 `docs/releases/<version>.md`；带 `-beta` 的标签发布为预发布版本，不替换稳定版。当前版本详见 [0.3.7 发布说明](docs/releases/0.3.7.md)，Factory 配套插件为 0.1.1。
 壳依赖插件 Release 中存在 `*-plugin.zip`（Codex ≥ 0.5.0 / Notion ≥ 0.2.0 / Multica ≥ 0.1.0 / Rebased ≥ 0.1.0）。

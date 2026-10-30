@@ -187,8 +187,62 @@ worker 必须拒绝 HTTPS、公网或局域网地址、userinfo、重定向、�
 
 ## 动态插件目录
 
-壳内置 `resources/catalog.json`，并与下面的本地扩展目录合并：
+目录按 **内置 → 官方清单 → 本地** 三层合并（后者覆盖前者）：
 
-`%LOCALAPPDATA%\BackgroundStudio\catalog.json`
+1. 内置 `resources/catalog.json`：离线 bootstrap。
+2. 官方静态清单 `https://raw.githubusercontent.com/background-studio/.github/main/registry/v1.json`（网络或上次成功缓存）。
+3. 本地扩展 `%LOCALAPPDATA%\BackgroundStudio\catalog.json`：仅用于自定义插件。新装只写空模板；旧版本复制出的内置项（同 `id` 且 `owner` 为 `background-studio`）视为官方镜像并忽略，不会遮挡官方新元数据。同 `id` 但 `owner` 不同的项是用户替换的第三方源，照常覆盖，并按其自身仓库查版本。
 
-目录项只负责发现仓库和 Release；运行时 exe、pipe、能力和设置 Schema 以已安装版本的 `plugin.json` 为准。同 `id` 时本地目录项覆盖内置项。
+目录项只负责发现仓库和 Release；运行时 exe、pipe、能力和设置 Schema 以已安装版本的 `plugin.json` 为准。
+
+## 官方静态清单（registry v1）
+
+一次 `GET` 同时提供官方目录、插件版本与壳版本；壳不依赖 `gh` / 登录，也不为官方插件或壳访问 GitHub REST API。
+
+```jsonc
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-05-01T08:00:00Z",          // RFC 3339
+  "plugins": [{
+    "id": "factory", "displayName": "...", "owner": "background-studio", "repo": "factory_desktop_background",
+    "assetPrefix": "FactoryBackgroundStudio-", "exeName": "Factory Background Studio.exe",
+    "pipeName": "\\\\.\\pipe\\background-studio-factory", "targetHint": "...", "icon": "factory.png",
+    "releases": { "stable": Release | null, "prerelease": Release | null }
+  }],
+  "host": { "stable": Release | null, "prerelease": Release | null }
+}
+// Release
+{ "version": "0.1.1", "tag": "v0.1.1", "assetName": "FactoryBackgroundStudio-0.1.1-plugin.zip",
+  "downloadUrl": "https://github.com/background-studio/<repo>/releases/download/<tag>/<assetName>",
+  "releaseUrl": "https://github.com/background-studio/<repo>/releases/tag/<tag>",
+  "sha256": "<64 位 hex>" | null }
+```
+
+校验规则（任一项不合规则整份拒绝，回用上次成功缓存并在界面顶部警告）：
+
+- 响应体 ≤ 1 MiB，单次请求 15 秒超时，不跟随重定向；未知字段忽略。
+- `schemaVersion == 1`；插件 ≤ 256 项；`id` 为 `^[a-z0-9][a-z0-9-]{0,63}$`、唯一、不得为 `console` / `host`。
+- `owner` 必须为 `background-studio`；`repo` / `assetPrefix` 仅含 `[A-Za-z0-9._-]`；`exeName` 为 `.exe` 纯文件名；`pipeName` 为 `\\.\pipe\` + `[A-Za-z0-9._-]+`；`icon` 为 null 或 `.png` 纯文件名。
+- `releases` / `host` 必须同时含 `stable` 与 `prerelease` 键（无版本写 null）；stable 版本不得带预发布段，prerelease 必须带。
+- `tag == "v" + version`；插件 `assetName == assetPrefix + version + "-plugin.zip"`，壳 `assetName == "Background.Studio_" + version + "_x64-setup.exe"`；`downloadUrl` / `releaseUrl` 必须精确等于由 owner/repo/tag/asset 拼出的 GitHub 地址。
+
+客户端行为：
+
+- 缓存：`%LOCALAPPDATA%\BackgroundStudio\cache\official-registry-v1.json`（原子写），TTL 5 分钟；过期后带 `If-None-Match` 重验，304 沿用缓存。合法但 `generatedAt` 更旧的响应不覆盖较新缓存（防 CDN 回滚），并给出警告。
+- 失败：指数退避 30 秒起、上限 10 分钟；回用上次成功缓存并在界面明确警告；没有缓存时官方插件与壳暂不显示新版本。官方插件**绝不**回退 REST；清单未收录的内置插件也不会偷偷查 API。
+- 手动「检查更新」跳过 TTL 与官方退避（仍带 ETag）；启动时的自动检查遵守 TTL 与退避。
+- 渠道：壳版本带预发布段时插件取 `releases.prerelease`，否则取 `releases.stable`；prerelease 为 null 时不回落 stable。壳自身始终只看 `host.stable`。
+- 安装仍由用户触发；`sha256` 非空时在解压与停止旧 worker 之前校验，壳安装包在启动安装程序前校验；为 null 时界面提示“无法校验完整性”。
+- 图标：没有本地 / 内置图标的官方插件从 `registry/icons/<id>.png` 拉取（≤ 2 MiB PNG），缓存到数据目录 `icons/official/<id>.png`；仅在清单 `generatedAt` 变化且距上次检查 ≥ 6 小时时带 ETag 重验，每次最多 8 个。
+- 一次查更的网络总预算 60 秒（持有核心锁期间有界）。
+
+本地自定义插件（非官方镜像）仍走 GitHub REST（已登录 `gh` 时用 `gh api`，否则匿名），结果缓存于 `cache\github-api-cache-v1.json`，TTL 30 分钟，失败退避（手动刷新也遵守），版本没有 SHA-256。
+
+## 查更诊断模式
+
+```
+"Background Studio.exe" --check-updates-json <outputPath> [--force-refresh]
+                        [--diagnostic-data-dir <dir> | --data-root <dir> --cache-dir <dir>]
+```
+
+与界面「检查更新」走同一生产路径，但不取单实例锁、不启动 worker、不写 `plugins.json` / profile / 自启动；会更新查更缓存与官方图标缓存。`--diagnostic-data-dir` 把数据目录、本地 catalog 与缓存全部放到该目录，完全隔离真实配置。报告包含数据源、缓存状态、官方清单 GET 与图标 GET 次数、REST 调用次数（本次与进程级实测计数）、各插件与壳的选中版本及 `sha256`；代理地址中的账号密码会被打码。`status` 为 `ok` / `degraded`（回用缓存、保留较新缓存、部分失败等）/ `failed`，退出码分别为 0 / 3 / 1，参数错误为 2。

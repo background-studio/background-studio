@@ -37,9 +37,10 @@ impl ProxySettings {
     }
 }
 
-pub fn build_blocking_client(
+/// 按壳代理设置配置好的 blocking 客户端 builder，调用方可再叠加超时 / 重定向策略。
+pub fn blocking_client_builder(
     settings: &ProxySettings,
-) -> Result<reqwest::blocking::Client, String> {
+) -> Result<reqwest::blocking::ClientBuilder, String> {
     settings.validate()?;
     let mut builder = reqwest::blocking::Client::builder();
     match settings.mode {
@@ -55,9 +56,7 @@ pub fn build_blocking_client(
             builder = builder.proxy(proxy);
         }
     }
-    builder
-        .build()
-        .map_err(|error| format!("创建 HTTP 客户端失败：{error}"))
+    Ok(builder)
 }
 
 /// 让子进程（如 `gh api`）的代理行为尽量与壳设置一致。

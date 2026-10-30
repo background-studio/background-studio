@@ -48,7 +48,8 @@ const RED: Color32 = Color32::from_rgb(224, 92, 101);
 
 #[derive(Clone)]
 enum Command {
-    Refresh,
+    /// 检查更新；true=用户手动（跳过 TTL / 官方退避），false=启动自动（遵守 TTL）。
+    Refresh(bool),
     Install(String),
     Uninstall(String),
     SetEnabled(String, bool),
@@ -278,7 +279,7 @@ impl StudioApp {
             _instance: instance,
             quitting: false,
         };
-        app.dispatch(Command::Refresh);
+        app.dispatch(Command::Refresh(false));
         Ok(app)
     }
 
@@ -961,7 +962,7 @@ impl StudioApp {
                             .add_enabled(self.busy_count == 0, egui::Button::new("检查更新"))
                             .clicked()
                         {
-                            self.dispatch(Command::Refresh);
+                            self.dispatch(Command::Refresh(true));
                         }
                     });
                 });
@@ -1532,9 +1533,13 @@ async fn execute_command(
 ) -> Result<(), String> {
     let mut core = core.lock().await;
     match command {
-        Command::Refresh => {
+        Command::Refresh(force) => {
             core.reload_catalog()?;
-            core.refresh_latest()?;
+            core.refresh_latest(if force {
+                crate::registry::RefreshMode::Force
+            } else {
+                crate::registry::RefreshMode::Auto
+            })?;
             core.handshake_enabled().await?;
         }
         Command::Install(id) => {
@@ -1640,9 +1645,36 @@ async fn execute_command(
             let download_url = release
                 .download_url
                 .ok_or_else(|| "最新版没有可下载的安装包。".to_string())?;
+            // 官方清单已绑定 owner/repo/tag/asset；这里再复核一次，防止内存状态被篡改。
+            let version = release
+                .latest_version
+                .ok_or_else(|| "请先检查更新。".to_string())?;
+            // 后端也校验必须严格高于当前版本，不只依赖 UI 按钮是否显示。
+            let current = crate::host_update::current_version();
+            if !crate::host_update::version_newer(&version, &current) {
+                return Err(format!(
+                    "官方最新壳版本 {version} 不高于当前版本 {current}，已拒绝安装。"
+                ));
+            }
+            let expected = crate::registry::github_download_url(
+                crate::catalog::OFFICIAL_OWNER,
+                crate::registry::HOST_REPO,
+                &format!("v{version}"),
+                &asset_name,
+            );
+            if download_url != expected
+                || asset_name != format!("Background.Studio_{version}_x64-setup.exe")
+            {
+                return Err("壳安装包地址与官方仓库身份不符，已拒绝下载。".to_string());
+            }
             let path = crate::host_update::installer_temp_path(&asset_name);
             let settings = core.proxy_settings();
             let progress_tx = tx.clone();
+            let download_message = if release.sha256.is_some() {
+                "正在下载宿主更新…".to_string()
+            } else {
+                "正在下载宿主更新…（官方清单未提供 SHA-256，无法校验完整性）".to_string()
+            };
             crate::host_update::download_with_progress(
                 &download_url,
                 &path,
@@ -1655,10 +1687,20 @@ async fn execute_command(
                         id: "host".to_string(),
                         phase: "download".to_string(),
                         percent,
-                        message: "正在下载宿主更新…".to_string(),
+                        message: download_message.clone(),
                     }));
                 },
             )?;
+            // 有官方 SHA-256 时必须校验通过才启动安装程序。
+            if let Some(expected) = release.sha256.as_deref() {
+                let _ = tx.send(UiEvent::Progress(InstallProgress {
+                    id: "host".to_string(),
+                    phase: "verify".to_string(),
+                    percent: None,
+                    message: "校验宿主安装包 SHA-256…".to_string(),
+                }));
+                crate::host_update::verify_sha256(&path, expected)?;
+            }
             crate::host_update::launch_installer(&path)?;
             let _ = tx.send(UiEvent::Quit);
         }

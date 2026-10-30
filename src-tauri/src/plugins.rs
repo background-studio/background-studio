@@ -21,6 +21,8 @@ use crate::{
     core::{load_from_install_dir, protocol::capability_labels, request, request_with_params},
     host_update,
     proxy::{ProxyMode, ProxySettings},
+    registry::{self, Channel, RefreshMode},
+    updates::{self, PluginLatest, ReleaseSource},
 };
 
 #[derive(Clone, Debug, Serialize)]
@@ -112,11 +114,20 @@ pub struct PluginManager {
     catalog: Vec<PluginDef>,
     state: PluginsState,
     children: HashMap<String, Child>,
-    latest: HashMap<String, (String, String)>,
-    /// 最近一次为该插件查询最新版失败的原因（限流 / 无资产等）。
-    latest_errors: HashMap<String, String>,
+    latest: HashMap<String, PluginLatest>,
+    /// 最近一次为该插件查询最新版失败 / 陈旧的原因，以及是否列入顶部汇总。
+    latest_errors: HashMap<String, (String, bool)>,
     host_release: host_update::HostReleaseInfo,
     host_release_error: Option<String>,
+    /// 查更缓存目录（%LOCALAPPDATA%/BackgroundStudio/cache）。
+    cache_dir: PathBuf,
+    /// 当前用于合并目录的官方清单插件项（网络或上次成功缓存）。
+    official_defs: Option<Vec<PluginDef>>,
+    /// 官方清单回退缓存 / 不可用时的用户可见警告。
+    official_warning: Option<String>,
+    /// 最近一次查更是否拿到了官方清单（网络或缓存）。
+    official_available: bool,
+    catalog_warnings: Vec<String>,
 }
 
 impl PluginManager {
@@ -124,7 +135,16 @@ impl PluginManager {
         let bootstrap = config::bootstrap_directory();
         catalog::ensure_default_overlay(&bootstrap)?;
         catalog::sync_bundled_icons(&data_dir)?;
-        let catalog = catalog::load_catalog(&bootstrap)?;
+        let cache_dir = updates::cache_directory();
+        // 启动不联网：用上次成功的官方清单缓存合并目录，新插件离线也能出现。
+        let official_defs =
+            registry::load_cached_registry(&cache_dir).map(|registry| registry.plugin_defs());
+        let (local, catalog_warnings) = catalog::load_local_overlay(&bootstrap)?;
+        let catalog = catalog::merge_catalog(
+            &catalog::builtin_catalog()?,
+            official_defs.as_deref(),
+            &local,
+        );
 
         fs::create_dir_all(data_dir.join("plugins")).map_err(|error| error.to_string())?;
         let path = data_dir.join("plugins.json");
@@ -164,6 +184,11 @@ impl PluginManager {
             latest_errors: HashMap::new(),
             host_release: host_update::HostReleaseInfo::default(),
             host_release_error: None,
+            cache_dir,
+            official_available: official_defs.is_some(),
+            official_defs,
+            official_warning: None,
+            catalog_warnings,
         };
         manager.save()?;
         Ok(manager)
@@ -171,7 +196,28 @@ impl PluginManager {
 
     pub fn reload_catalog(&mut self) -> Result<(), String> {
         let bootstrap = config::bootstrap_directory();
-        self.catalog = catalog::load_catalog(&bootstrap)?;
+        let (local, warnings) = catalog::load_local_overlay(&bootstrap)?;
+        self.catalog_warnings = warnings;
+        self.catalog = catalog::merge_catalog(
+            &catalog::builtin_catalog()?,
+            self.official_defs.as_deref(),
+            &local,
+        );
+        self.prune_stale_latest();
+        self.ensure_records()
+    }
+
+    /// 目录源变化（如本地改成第三方 fork、或删除自定义项回到官方）后，
+    /// 旧来源的 latest 不得继续用于安装。
+    fn prune_stale_latest(&mut self) {
+        let catalog = &self.catalog;
+        self.latest
+            .retain(|id, latest| catalog::find(catalog, id).is_some_and(|def| latest.matches(def)));
+        self.latest_errors
+            .retain(|id, _| catalog::find(catalog, id).is_some());
+    }
+
+    fn ensure_records(&mut self) -> Result<(), String> {
         for plugin in &self.catalog {
             if !self.state.plugins.iter().any(|item| item.id == plugin.id) {
                 self.state.plugins.push(PluginRecord {
@@ -325,32 +371,78 @@ impl PluginManager {
             .any(|plugin| plugin.id == id && plugin.enabled && plugin.installed_version.is_some())
     }
 
-    pub fn refresh_latest(&mut self) -> Result<(), String> {
-        let catalog = self.catalog.clone();
+    /// 查更：一次官方清单请求 + 仅自定义插件的 REST；只更新内存版本信息与目录，
+    /// 不安装、不升级、不启动插件。
+    pub fn refresh_latest(&mut self, mode: RefreshMode) -> Result<(), String> {
+        let bootstrap = config::bootstrap_directory();
+        let (local, catalog_warnings) = catalog::load_local_overlay(&bootstrap)?;
+        let builtin = catalog::builtin_catalog()?;
         let proxy = self.state.proxy.clone();
-        for plugin in catalog {
-            match fetch_latest_plugin_asset(&plugin, &proxy) {
-                Ok((version, asset)) => {
-                    self.latest.insert(plugin.id.clone(), (version, asset));
-                    self.latest_errors.remove(&plugin.id);
-                }
-                Err(error) => {
-                    eprintln!("刷新 {} 最新版本失败：{error}", plugin.id);
-                    self.latest_errors.insert(plugin.id.clone(), error);
-                }
+        let check = updates::check_updates_live(
+            updates::CheckInputs {
+                cache_dir: &self.cache_dir,
+                builtin: &builtin,
+                local: &local,
+                catalog_warnings,
+                mode,
+                channel: Channel::current(),
+                now: chrono::Utc::now().timestamp(),
+                icon_data_dir: Some(&self.data_dir),
+                deadline: Instant::now() + updates::CHECK_BUDGET,
+            },
+            &proxy,
+        );
+        self.apply_update_check(check)
+    }
+
+    fn apply_update_check(&mut self, check: updates::UpdateCheck) -> Result<(), String> {
+        if let Some(registry) = &check.registry.registry {
+            self.official_defs = Some(registry.plugin_defs());
+        }
+        self.official_available = check.registry.registry.is_some();
+        self.official_warning = check.registry.warning.clone();
+        if let Some(error) = &check.registry.error {
+            eprintln!("官方清单：{error}");
+        }
+        for error in &check.icon_errors {
+            eprintln!("官方图标下载失败：{error}");
+        }
+        let mut catalog_warnings = check.catalog_warnings.clone();
+        if let Some(error) = &check.registry.cache.write_error {
+            catalog_warnings.push(format!("写入官方清单缓存失败：{error}"));
+        }
+        if !check.budget_skipped.is_empty() {
+            catalog_warnings.push(format!(
+                "本次检查更新超出时间预算，已跳过：{}",
+                check.budget_skipped.join("、")
+            ));
+        }
+        self.catalog_warnings = catalog_warnings;
+        self.catalog = check.catalog;
+        // 每次查更整体重建：源变化 / 清单移除的条目不会残留旧 latest。
+        self.latest.clear();
+        self.latest_errors.clear();
+        for plugin in check.plugins {
+            if let Some(latest) = plugin.latest {
+                self.latest.insert(plugin.id.clone(), latest);
+            }
+            if let Some(error) = plugin.error {
+                self.latest_errors
+                    .insert(plugin.id.clone(), (error, plugin.aggregate_error));
             }
         }
-        match host_update::fetch_latest_host_release(&proxy) {
+        match check.host {
             Ok(info) => {
                 self.host_release = info;
                 self.host_release_error = None;
             }
             Err(error) => {
-                eprintln!("刷新壳最新版本失败：{error}");
+                // 不保留旧的壳版本信息：来源必须是本次（或缓存的）官方清单。
+                self.host_release = host_update::HostReleaseInfo::default();
                 self.host_release_error = Some(error);
             }
         }
-        Ok(())
+        self.ensure_records()
     }
 
     pub fn host_release(&self) -> &host_update::HostReleaseInfo {
@@ -362,12 +454,12 @@ impl PluginManager {
         F: FnMut(&str, Option<f64>, &str),
     {
         if !self.latest.contains_key(id) {
-            self.refresh_latest()?;
+            self.refresh_latest(RefreshMode::Auto)?;
         }
-        let (version, asset_name) = match self.latest.get(id).cloned() {
-            Some(pair) => pair,
+        let latest = match self.latest.get(id).cloned() {
+            Some(latest) => latest,
             None => {
-                if let Some(error) = self.latest_errors.get(id) {
+                if let Some((error, _)) = self.latest_errors.get(id) {
                     return Err(format!("无法获取 {id} 的最新版：{error}"));
                 }
                 return Err(format!(
@@ -375,7 +467,18 @@ impl PluginManager {
                 ));
             }
         };
-        let version_dir = version.trim_start_matches('v').to_string();
+        // 复核来源身份：目录项若已换源，旧版本信息作废。
+        let exe_name = {
+            let spec = self.spec(id)?;
+            if !latest.matches(spec) {
+                self.latest.remove(id);
+                return Err(format!(
+                    "{id} 的插件来源已变化，旧的版本信息已作废，请重新「检查更新」。"
+                ));
+            }
+            spec.exe_name.clone()
+        };
+        let version_dir = latest.version.trim_start_matches('v').to_string();
         let installed = self
             .state
             .plugins
@@ -385,16 +488,20 @@ impl PluginManager {
         // Validate before downloading or stopping a working plugin. A stale
         // Release cache must never turn an update into a downgrade.
         validate_install_version(installed, &version_dir)?;
-        let tag = format!("v{version_dir}");
-        let (owner, repo, exe_name) = {
-            let spec = self.spec(id)?;
-            (spec.owner.clone(), spec.repo.clone(), spec.exe_name.clone())
-        };
-        let download_url =
-            format!("https://github.com/{owner}/{repo}/releases/download/{tag}/{asset_name}");
+        let download_url = latest.download_url.clone();
         let zip_path = self.data_dir.join(format!("{id}-{version_dir}-plugin.zip"));
         let proxy = self.state.proxy.clone();
-        on_progress("download", Some(0.0), "开始下载…");
+        // 没有 SHA-256 时在 UI 进度里持续提示无法校验完整性（不只写 stderr）。
+        let integrity_note = match (latest.sha256.is_some(), latest.source) {
+            (true, _) => "",
+            (false, ReleaseSource::Official) => "（官方清单未提供 SHA-256，无法校验完整性）",
+            (false, ReleaseSource::GithubApi) => "（自定义来源无 SHA-256，无法校验完整性）",
+        };
+        on_progress(
+            "download",
+            Some(0.0),
+            &format!("开始下载 {version_dir}…{integrity_note}"),
+        );
         let mut last_reported = 0u8;
         host_update::download_with_progress(
             &download_url,
@@ -408,10 +515,21 @@ impl PluginManager {
                 let bucket = percent.floor() as u8 / 2;
                 if bucket != last_reported || downloaded == total.unwrap_or(downloaded) {
                     last_reported = bucket;
-                    on_progress("download", Some(percent), &format!("下载中 {percent:.0}%"));
+                    on_progress(
+                        "download",
+                        Some(percent),
+                        &format!("下载中 {percent:.0}%{integrity_note}"),
+                    );
                 }
             },
         )?;
+        // 官方清单给出 SHA-256 时，必须在解压与停止旧 worker 之前校验通过。
+        if let Some(expected) = latest.sha256.as_deref() {
+            on_progress("verify", None, "校验 SHA-256…");
+            host_update::verify_sha256(&zip_path, expected)?;
+        } else {
+            on_progress("verify", None, &format!("未校验 SHA-256{integrity_note}"));
+        }
         on_progress("extract", None, "解压中…");
         let target = self.install_dir(id, &version_dir);
         let staging = target.with_file_name(format!(
@@ -694,17 +812,19 @@ impl PluginManager {
             let (latest_version, latest_asset_name) = self
                 .latest
                 .get(&plugin.id)
-                .cloned()
-                .map(|(version, asset)| (Some(version), Some(asset)))
+                .map(|latest| {
+                    (
+                        Some(latest.version.clone()),
+                        Some(latest.asset_name.clone()),
+                    )
+                })
                 .unwrap_or((None, None));
-            if latest_version.is_none() {
-                if let Some(error) = self.latest_errors.get(&plugin.id) {
-                    refresh_failures.push(format!("{}：{error}", plugin.display_name));
-                }
+            if let Some((error, true)) = self.latest_errors.get(&plugin.id) {
+                refresh_failures.push(format!("{}：{error}", plugin.display_name));
             }
             let running = self.is_running(&plugin.id);
             let mut status_message = if record.installed_version.is_none() {
-                if let Some(error) = self.latest_errors.get(&plugin.id) {
+                if let Some((error, _)) = self.latest_errors.get(&plugin.id) {
                     format!("未安装 · {error}")
                 } else {
                     "未安装".to_string()
@@ -779,15 +899,21 @@ impl PluginManager {
         let host_update_available = host_latest_version
             .as_deref()
             .is_some_and(|latest| host_update::version_newer(latest, &host_version));
+        // 官方清单整体不可用时由清单警告统一说明，不再逐项重复。
         if let Some(error) = &self.host_release_error {
-            refresh_failures.push(format!("壳：{error}"));
+            if self.official_available {
+                refresh_failures.push(format!("壳：{error}"));
+            }
         }
+        let mut parts: Vec<String> = warning.take().into_iter().collect();
+        // 官方清单回退缓存 / 不可用：UI 顶部常驻可见，而非只写 stderr。
+        parts.extend(self.official_warning.clone());
+        parts.extend(self.catalog_warnings.iter().cloned());
         if !refresh_failures.is_empty() {
-            let detail = refresh_failures.join("；");
-            warning = Some(match warning {
-                Some(existing) => format!("{existing} 检查更新失败：{detail}"),
-                None => format!("检查更新失败：{detail}"),
-            });
+            parts.push(format!("检查更新失败：{}", refresh_failures.join("；")));
+        }
+        if !parts.is_empty() {
+            warning = Some(parts.join(" "));
         }
         HostSnapshot {
             plugins: cards,
@@ -876,61 +1002,6 @@ fn extract_zip(zip_path: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn fetch_latest_plugin_asset(
-    spec: &PluginDef,
-    proxy: &ProxySettings,
-) -> Result<(String, String), String> {
-    let prerelease_channel = env!("CARGO_PKG_VERSION").contains('-');
-    let endpoint = if prerelease_channel {
-        format!("repos/{}/{}/releases?per_page=20", spec.owner, spec.repo)
-    } else {
-        format!("repos/{}/{}/releases/latest", spec.owner, spec.repo)
-    };
-    let value = host_update::github_api_get(&endpoint, proxy)?;
-    select_plugin_asset(spec, &value, prerelease_channel)
-}
-
-fn select_plugin_asset(
-    spec: &PluginDef,
-    value: &Value,
-    prerelease_channel: bool,
-) -> Result<(String, String), String> {
-    let release = if prerelease_channel {
-        value
-            .as_array()
-            .and_then(|releases| {
-                releases.iter().find(|release| {
-                    release.get("draft").and_then(Value::as_bool) != Some(true)
-                        && release.get("prerelease").and_then(Value::as_bool) == Some(true)
-                })
-            })
-            .ok_or_else(|| "没有找到可用的插件预发布版本。".to_string())?
-    } else {
-        value
-    };
-    let tag = release
-        .get("tag_name")
-        .and_then(|tag| tag.as_str())
-        .ok_or_else(|| "Release 缺少 tag_name（仓库可能还没有正式发布）。".to_string())?
-        .to_string();
-    let assets = release
-        .get("assets")
-        .and_then(|assets| assets.as_array())
-        .ok_or_else(|| "Release 缺少 assets".to_string())?;
-    let asset = assets
-        .iter()
-        .filter_map(|asset| asset.get("name").and_then(|name| name.as_str()))
-        .find(|name| name.starts_with(&spec.asset_prefix) && name.ends_with("-plugin.zip"))
-        .ok_or_else(|| {
-            format!(
-                "最新 Release {} 中没有 {}*-plugin.zip",
-                tag, spec.asset_prefix
-            )
-        })?
-        .to_string();
-    Ok((tag.trim_start_matches('v').to_string(), asset))
-}
-
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     fs::create_dir_all(dst).map_err(|error| error.to_string())?;
     for entry in fs::read_dir(src).map_err(|error| error.to_string())? {
@@ -1005,9 +1076,7 @@ fn detect_standalone_warning() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{select_plugin_asset, validate_install_version};
-    use crate::catalog::PluginDef;
-    use serde_json::json;
+    use super::validate_install_version;
 
     #[test]
     fn plugin_updates_require_a_strictly_newer_version() {
@@ -1036,62 +1105,5 @@ mod tests {
     fn fresh_install_requires_a_valid_release_version() {
         assert!(validate_install_version(None, "v0.3.6").is_ok());
         assert!(validate_install_version(None, "invalid").is_err());
-    }
-
-    fn plugin() -> PluginDef {
-        PluginDef {
-            id: "codex".to_string(),
-            display_name: "Codex".to_string(),
-            owner: "background-studio".to_string(),
-            repo: "codex_desktop_background".to_string(),
-            asset_prefix: "CodexBackgroundStudio-".to_string(),
-            exe_name: "Codex Background Studio.exe".to_string(),
-            pipe_name: r"\\.\pipe\background-studio-codex-v1".to_string(),
-            target_hint: String::new(),
-            icon: None,
-        }
-    }
-
-    #[test]
-    fn stable_channel_reads_latest_release_object() {
-        let value = json!({
-            "tag_name": "v0.5.4",
-            "assets": [{ "name": "CodexBackgroundStudio-0.5.4-plugin.zip" }]
-        });
-        assert_eq!(
-            select_plugin_asset(&plugin(), &value, false).unwrap(),
-            (
-                "0.5.4".to_string(),
-                "CodexBackgroundStudio-0.5.4-plugin.zip".to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn prerelease_channel_ignores_stable_and_draft_releases() {
-        let value = json!([
-            {
-                "tag_name": "v0.5.4",
-                "draft": false,
-                "prerelease": false,
-                "assets": [{ "name": "CodexBackgroundStudio-0.5.4-plugin.zip" }]
-            },
-            {
-                "tag_name": "v0.5.5-beta.2",
-                "draft": true,
-                "prerelease": true,
-                "assets": [{ "name": "CodexBackgroundStudio-0.5.5-beta.2-plugin.zip" }]
-            },
-            {
-                "tag_name": "v0.5.5-beta.1",
-                "draft": false,
-                "prerelease": true,
-                "assets": [{ "name": "CodexBackgroundStudio-0.5.5-beta.1-plugin.zip" }]
-            }
-        ]);
-        assert_eq!(
-            select_plugin_asset(&plugin(), &value, true).unwrap().0,
-            "0.5.5-beta.1"
-        );
     }
 }

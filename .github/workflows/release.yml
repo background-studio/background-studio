@@ -38,6 +38,7 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $cargo = cargo metadata --manifest-path src-tauri/Cargo.toml --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $cargoVersion = ($cargo.packages | Where-Object name -eq "background-studio").version
           if ($tag -ne "v$cargoVersion") {
             throw "标签 $tag 与 Cargo.toml 版本 v$cargoVersion 不一致。"
@@ -46,7 +47,9 @@ jobs:
       - name: Run checks
         run: |
           cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-          cargo test --manifest-path src-tauri/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install cargo-packager
         run: cargo install cargo-packager --version 0.11.8 --locked
@@ -68,8 +71,11 @@ jobs:
           }
           $releaseAsset = Join-Path $asset.DirectoryName "Background.Studio_${version}_x64-setup.exe"
           Move-Item $asset.FullName $releaseAsset -Force
+          $checksumPath = "$releaseAsset.sha256"
+          $hash = (Get-FileHash $releaseAsset -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path $releaseAsset -Leaf)" | Set-Content -Path $checksumPath -Encoding utf8
           $releaseArgs = @(
-            "release", "create", $tag, $releaseAsset,
+            "release", "create", $tag, $releaseAsset, $checksumPath, "--verify-tag",
             "--title", "Background Studio $tag",
             "--notes-file", "docs/releases/$version.md"
           )
@@ -77,6 +83,7 @@ jobs:
             $releaseArgs += "--prerelease"
           }
           gh @releaseArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Notify scoop-bucket to sync manifest
         if: ${{ !contains(github.ref_name, '-') }}

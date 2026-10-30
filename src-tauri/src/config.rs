@@ -57,6 +57,18 @@ pub fn resolve_data_directory() -> Result<PathBuf, String> {
     Ok(bootstrap)
 }
 
+/// 只读解析数据目录（不创建目录），供诊断模式使用。
+pub fn peek_data_directory() -> Result<PathBuf, String> {
+    let config = load_host_config()?;
+    Ok(config
+        .data_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(bootstrap_directory))
+}
+
 pub fn set_data_root(path: &Path) -> Result<PathBuf, String> {
     let canonical = if path.exists() {
         fs::canonicalize(path).map_err(|error| error.to_string())?

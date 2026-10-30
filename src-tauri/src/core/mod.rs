@@ -78,7 +78,6 @@ pub struct HostCore {
     slideshow_ticks: HashMap<String, Instant>,
     /// 控制台背景当前解析出的图片文件（事件驱动更新，避免快照循环反复解析）。
     console_background_path: Option<PathBuf>,
-    last_phase: HashMap<String, String>,
     window_media: HashMap<String, HashMap<String, window_media::WindowMedia>>,
 }
 
@@ -122,7 +121,6 @@ impl HostCore {
             hello: HashMap::new(),
             slideshow_ticks: HashMap::new(),
             console_background_path: None,
-            last_phase: HashMap::new(),
             window_media: HashMap::new(),
         };
         core.load_profiles()?;
@@ -227,8 +225,11 @@ impl HostCore {
         self.plugins.set_proxy(proxy)
     }
 
-    pub fn refresh_latest(&mut self) -> Result<(), String> {
-        self.plugins.refresh_latest()
+    /// 查更可能从官方清单带来新插件：随后补载 profile，保证新卡片能打开详情。
+    /// 只读取 / 缺省创建 profile，不启动插件、不改已有用户配置。
+    pub fn refresh_latest(&mut self, mode: crate::registry::RefreshMode) -> Result<(), String> {
+        self.plugins.refresh_latest(mode)?;
+        self.load_profiles()
     }
 
     pub fn relocate_data_directory(&mut self, new_root: PathBuf) -> Result<(), String> {
@@ -247,6 +248,8 @@ impl HostCore {
         F: FnMut(&str, Option<f64>, &str),
     {
         self.plugins.install(id, on_progress)?;
+        // 安装前可能触发了查更并合并出新插件。
+        self.load_profiles()?;
         self.normalize_profile_for_plugin(id)
     }
 
@@ -254,7 +257,6 @@ impl HostCore {
         self.clear_window_media(id);
         self.hello.remove(id);
         self.slideshow_ticks.remove(id);
-        self.last_phase.remove(id);
         self.plugins.uninstall(id)
     }
 
@@ -338,11 +340,7 @@ impl HostCore {
         if self.runtime_protocol(id) >= HOST_PROTOCOL {
             self.configure_profile(id).await?;
         }
-        let result = self.plugins.plugin_request(id, "apply", None).await?;
-        if let Some(phase) = result.get("phase").and_then(Value::as_str) {
-            self.last_phase.insert(id.to_string(), phase.to_string());
-        }
-        Ok(result)
+        self.plugins.plugin_request(id, "apply", None).await
     }
 
     pub async fn configure_profile(&mut self, id: &str) -> Result<Value, String> {
@@ -494,7 +492,6 @@ impl HostCore {
         for card in &mut snapshot.plugins {
             let protocol = self.runtime_protocol(&card.id);
             card.plugin_protocol = protocol;
-            self.last_phase.insert(card.id.clone(), card.phase.clone());
         }
         snapshot.console_background = self.console_background_view();
         snapshot
@@ -785,14 +782,11 @@ impl HostCore {
             self.slideshow_ticks.insert(id.clone(), now);
             match self.advance_slideshow(&id) {
                 Ok(true) => {
+                    // 协议 2 的 configure 在目标 active 时会热更新背景，无需再发 apply。
+                    // 额外的 apply 在会话已失效时会退化成"强制重启目标程序"，导致轮播
+                    // 周期性地关掉用户未托管的 Notion/Grok 等程序。
                     if let Err(error) = self.configure_profile(&id).await {
                         first_error.get_or_insert(error);
-                        continue;
-                    }
-                    if self.last_phase.get(&id).map(String::as_str) == Some("active") {
-                        if let Err(error) = self.plugins.plugin_request(&id, "apply", None).await {
-                            first_error.get_or_insert(error);
-                        }
                     }
                 }
                 Ok(false) => {}
